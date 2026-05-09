@@ -68,11 +68,23 @@ PROMPT_TEMPLATE = """\
 
 
 def _strip_json_fences(text: str) -> str:
-    """Remove ```json ... ``` or ``` ... ``` wrapping if Claude added it."""
+    """Pull a JSON object out of a Claude response.
+
+    Handles three observed cases:
+      1. plain JSON
+      2. ```json ... ``` markdown fences
+      3. preamble prose + JSON (Claude sometimes ignores 'no prose' instruction)
+    """
     text = text.strip()
-    m = re.match(r"^```(?:json)?\s*\n(.*?)\n```$", text, re.DOTALL)
+    # Case 2: markdown fences
+    m = re.match(r"^```(?:json)?\s*\n(.*?)\n```\s*$", text, re.DOTALL)
     if m:
         return m.group(1).strip()
+    # Case 3: anything wrapped around { ... }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
     return text
 
 
