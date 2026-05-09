@@ -187,11 +187,17 @@ class ClaudeResearchSource(Source):
         return items
 
     def _parse_response(self, resp) -> list[RawItem]:
-        # Find the final text block (Claude appends prose after tool_use blocks).
-        text = ""
+        # Concatenate ALL text blocks. Claude with web_search returns content
+        # as a sequence of (server_tool_use, tool_result, text, server_tool_use,
+        # tool_result, text, …, final text). The JSON answer can span the last
+        # text block OR be split across earlier text blocks; safest is to join.
+        text_parts: list[str] = []
         for block in resp.content:
             if getattr(block, "type", None) == "text":
-                text = block.text or ""
+                t = block.text or ""
+                if t:
+                    text_parts.append(t)
+        text = "\n".join(text_parts)
         text = _strip_json_fences(text)
         if not text:
             log.warning("claude_research.empty_text", name=self.name)
