@@ -50,6 +50,16 @@ class Buckets(BaseModel):
     buckets: list[Bucket]
 
 
+class TopicQuery(BaseModel):
+    name: str
+    query: str
+    tier: int = 3
+
+
+class TopicQueries(BaseModel):
+    queries: list[TopicQuery]
+
+
 class Collection(BaseModel):
     recency_hours: int = 24
     fetch_concurrency: int = 10
@@ -70,6 +80,7 @@ class Config(BaseModel):
     watchlists_path: Path = Path("config/watchlists.yaml")
     relevance_path: Path = Path("config/relevance.yaml")
     query_buckets_path: Path = Path("config/query_buckets.yaml")
+    topic_queries_path: Path = Path("config/topic_queries.yaml")
     scheduler: Scheduler = Field(default_factory=Scheduler)
     collection: Collection = Field(default_factory=Collection)
 
@@ -106,3 +117,8 @@ def load_relevance(path: Path) -> Relevance:
 def load_buckets(path: Path) -> Buckets:
     with open(path) as f:
         return Buckets.model_validate(yaml.safe_load(f))
+
+
+def load_topic_queries(path: Path) -> TopicQueries:
+    with open(path) as f:
+        return TopicQueries.model_validate(yaml.safe_load(f))

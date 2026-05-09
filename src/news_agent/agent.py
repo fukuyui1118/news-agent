@@ -14,6 +14,7 @@ from .config import (
     load_buckets,
     load_config,
     load_relevance,
+    load_topic_queries,
     load_watchlists,
 )
 from .mailer import Mailer, MailerConfig
@@ -149,6 +150,30 @@ def build_sources(config: Config) -> list[Source]:
                 tier=2,
             )
         )
+
+    # Topic queries: broad sector / regulation / market-trend coverage that
+    # complements entity×bucket. Catches stories where no specific entity is
+    # named (e.g. industry regulation, IPOs of unfamiliar carriers, market
+    # structure shifts). Phase 6.y.
+    try:
+        topic_queries = load_topic_queries(config.topic_queries_path)
+    except FileNotFoundError:
+        topic_queries = None
+
+    if topic_queries is not None:
+        log.info("topic_queries.loaded", count=len(topic_queries.queries))
+        recency = config.collection.recency_hours
+        for tq in topic_queries.queries:
+            full_query = f"{tq.query} when:{recency}h"
+            encoded = urllib.parse.quote(full_query)
+            url = f"https://news.google.com/rss/search?q={encoded}&hl=ja&gl=JP&ceid=JP:ja"
+            sources.append(
+                RSSSource(
+                    name=f"GN-Topic: {tq.name}",
+                    url=url,
+                    tier=tq.tier,
+                )
+            )
 
     return sources
 

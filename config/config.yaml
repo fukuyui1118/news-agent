@@ -40,6 +40,7 @@ logging:
 watchlists_path: config/watchlists.yaml
 relevance_path: config/relevance.yaml
 query_buckets_path: config/query_buckets.yaml
+topic_queries_path: config/topic_queries.yaml
 
 collection:
   recency_hours: 24       # passed into Google's `when:Nh` operator + post-fetch filter

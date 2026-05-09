@@ -57,15 +57,28 @@ python -m news_agent --dry-run               # scheduler in dry-run mode
 - `config/relevance.yaml` — business keywords for the **post-fetch relevance gate**. Independent from query_buckets.
 - `.env` — secrets only. **Must contain a Gmail app password (16 chars) for SMTP_PASSWORD, not your regular Gmail password.**
 
-## How searches work (Phase 6)
-**Searches are NOT AI-generated.** Queries are built by cross-product at runtime:
+## How searches work — two-layer query design
 
-- For each entity in `watchlists.yaml` (currently 54: 20 P1 + 34 P2), for each bucket in `query_buckets.yaml` (currently 8): build one Google News query `(entity aliases) (bucket keywords) when:24h`. Total = **432 queries per fetch cycle**.
-- Plus 3 static English RSS feeds (Insurance Journal, Reinsurance News, Artemis).
-- All sources fetched in parallel via `asyncio.to_thread` + `Semaphore(10)`. Cycle time ~3-5 min.
+**Searches are NOT AI-generated.** Queries are built deterministically at runtime in two complementary layers:
+
+### Layer 1 — Entity × Bucket (Phase 6)
+For each entity in `watchlists.yaml` (currently 54: 20 P1 + 34 P2), for each bucket in `query_buckets.yaml` (currently 8): build one Google News query `(entity aliases) (bucket keywords) when:24h`. Total = **432 queries per cycle**. Catches news where a specific watched company is named.
+
+### Layer 2 — Topic queries (Phase 6.y)
+Broad sector/regulatory/market-trend queries from `topic_queries.yaml` (currently 13). No entity binding — catches industry-level news where no specific company is mentioned, plus foreign carriers not in the watchlist (e.g. Indian, Florida specialty). Each gets `when:24h` appended.
+
+### Plus
+- 3 static English RSS feeds (Insurance Journal, Reinsurance News, Artemis).
+- 1 disabled Nikkei browser-use source (kept for future re-enablement).
+- All sources fetched in parallel via `asyncio.to_thread` + `Semaphore(10)`. Cycle time ~80-95s.
+- **Total: ~448 sources per cycle.**
 - Claude is called only at **summary time** (P1 batch + daily digest), never at fetch time.
 
-**To expand coverage:** add entities to `watchlists.yaml` (each new entity = 8 queries), or add buckets to `query_buckets.yaml` (each new bucket = 54 queries). No code changes needed.
+**To expand coverage:**
+- More watched companies → add to `watchlists.yaml` (each entity = 8 entity×bucket queries automatically).
+- More themes → add to `query_buckets.yaml` (each bucket = 54 entity×bucket queries automatically).
+- Industry/sector/regulation/market-trend topics → add to `topic_queries.yaml` (each = 1 broad query).
+- One-off RSS feeds → add to `config.yaml::sources`.
 
 The recency filter applies twice: once at source via Google's `when:Nh` operator (`config.yaml::collection.recency_hours`), once defensively in `agent.py::apply_recency_filter` for any stragglers and items missing pubdate.
 

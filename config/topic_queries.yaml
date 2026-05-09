@@ -1,0 +1,67 @@
+# Topic-level Google News queries — broad sector / regulatory / market-trend
+# coverage that complements the entity×bucket cross-product (Phase 6).
+#
+# Use these to catch stories that don't name a specific watched insurer:
+#   - industry trends, regulatory regime changes
+#   - IPOs of unfamiliar carriers
+#   - market structure shifts (health vs non-life share, etc.)
+#   - foreign carriers not in watchlists.yaml
+#
+# Each query gets `when:Nh` appended at URL-build time using
+# `config.collection.recency_hours`. URL-encoding is also automatic.
+
+queries:
+  # ---- Japan-focused industry topics ----
+  - name: 保険業界全般
+    query: (保険業界 OR 損保業界 OR 生保業界 OR 損害保険 OR 生命保険) (買収 OR M&A OR 上場 OR 規制 OR 業績 OR 制度 OR 不祥事 OR 行政処分 OR 金融庁)
+    tier: 3
+
+  - name: 保険規制・制度
+    query: (保険業法 OR 保険契約者保護 OR ソルベンシー OR 金融庁) (改正 OR 制度 OR 検討 OR 延長 OR 見直し)
+    tier: 3
+
+  - name: 健康保険・医療保険
+    query: (健康保険 OR 医療保険 OR 公的保険) (制度 OR 改革 OR 業界 OR シェア)
+    tier: 3
+
+  - name: 保険IPO・上場 (JP)
+    query: (保険 OR 保険会社) (新規上場 OR IPO OR 上場申請)
+    tier: 3
+
+  # ---- Global English-focused industry topics ----
+  - name: Insurance industry global
+    query: (insurance industry OR insurance sector) (M&A OR consolidation OR rating OR regulator OR scandal OR overhaul)
+    tier: 3
+
+  - name: Insurance IPO and listing
+    query: (insurance OR insurer OR reinsurer) (IPO OR listing OR "public offering" OR "NYSE listing")
+    tier: 3
+
+  - name: Health/life insurance markets
+    query: (health insurance OR life insurance OR non-life insurance) (market share OR industry OR consolidation OR M&A)
+    tier: 3
+
+  - name: Insurance regulator and oversight
+    query: (insurance regulator OR insurance commissioner OR FSA OR 金融庁) (action OR enforcement OR fine OR reform)
+    tier: 3
+
+  - name: Reinsurance market
+    query: (reinsurance OR retrocession OR cat bond) (market OR pricing OR capacity OR renewals)
+    tier: 3
+
+  - name: Insurance M&A global
+    query: (insurance OR insurer) (acquires OR merger OR takeover OR spinoff OR divest)
+    tier: 3
+
+  # ---- Specific markets not fully covered by the watchlist ----
+  - name: India insurance
+    query: (Indian insurance OR LIC OR "HDFC Life" OR "ICICI Prudential" OR "SBI Life" OR "Bajaj Allianz" OR "Max Life")
+    tier: 3
+
+  - name: US specialty / Florida
+    query: ("Florida insurance" OR "coastal insurance" OR Safepoint OR "Heritage Insurance" OR "Universal Insurance" OR "HCI Group" OR Kemper)
+    tier: 3
+
+  - name: Asia-Pacific insurance
+    query: ("Cathay Life" OR Fubon OR "Samsung Fire" OR QBE OR "IAG Australia" OR Suncorp OR "Sun Life")
+    tier: 3
