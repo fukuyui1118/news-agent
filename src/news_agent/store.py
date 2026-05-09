@@ -323,6 +323,40 @@ class Store:
         )
         return cur.fetchone()[0]
 
+    def last_successful_call_at(
+        self, *, provider: str, query_name: str | None = None
+    ) -> datetime | None:
+        """Return the UTC timestamp of the most recent successful (error IS NULL)
+        call for `provider` (and optionally `query_name`), or None if none."""
+        if query_name is None:
+            cur = self.conn.execute(
+                """
+                SELECT called_at FROM api_usage
+                WHERE provider = ? AND error IS NULL
+                ORDER BY called_at DESC LIMIT 1
+                """,
+                (provider,),
+            )
+        else:
+            cur = self.conn.execute(
+                """
+                SELECT called_at FROM api_usage
+                WHERE provider = ? AND query_name = ? AND error IS NULL
+                ORDER BY called_at DESC LIMIT 1
+                """,
+                (provider, query_name),
+            )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            dt = datetime.fromisoformat(row[0])
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
     def api_call_count_today(self, *, provider: str, timezone_name: str = "Asia/Tokyo") -> int:
         from zoneinfo import ZoneInfo
 

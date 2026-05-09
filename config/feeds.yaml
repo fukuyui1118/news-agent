@@ -41,111 +41,17 @@ native_rss:
     url: https://www.asahi.com/rss/asahi/business.rdf
     trust_freshness: true   # RDF feed; pubdate may be missing
 
-newsapi:
-  endpoint: https://eventregistry.org/api/v1/article/getArticles
-  monthly_cap: 4800
-  per_cycle_hard_cap: 8
-  daily_soft_warning: 200
-  timezone: Asia/Tokyo
+# Phase 8: NewsAPI.ai layer dropped entirely. Claude Opus 4.7 + web_search
+# replaces it as the curated research layer, fired twice daily via cadence
+# enforcement. The hourly fetch_cycle still invokes the source, but it
+# self-skips if the last successful call was within `cadence_hours`.
 
+claude_research:
+  monthly_token_cap: 2_000_000   # ~$60 ceiling at Opus 4.7 rates (advisory)
   queries:
-    # Each entry maps to one getArticles call per cycle.
-    # `concept_uri_keys` are looked up in concept_uris.yaml (resolved by setup script).
-    # `keyword_fallback` is used regardless and OR-joined with concept URIs in the query.
-
-    - name: P1 Japan EN
-      lang: eng
-      sort_by: date
-      articles_count: 100
-      concept_uri_keys:
-        - Tokio Marine
-        - Sompo
-        - MS&AD
-        - Dai-ichi Life
-        - Nippon Life
-        - Meiji Yasuda Life
-        - Japan Post Insurance
-        - Toa Re
-      keyword_fallback: []   # filled in for entities that don't resolve
-
-    - name: P1 Japan JP
-      lang: jpn
-      sort_by: date
-      articles_count: 100
-      concept_uri_keys:
-        - Tokio Marine
-        - Sompo
-        - MS&AD
-        - Dai-ichi Life
-        - Nippon Life
-        - Meiji Yasuda Life
-        - Japan Post Insurance
-        - Toa Re
-      keyword_fallback:
-        - 東京海上
-        - 損害保険ジャパン
-        - 三井住友海上
-        - あいおいニッセイ同和
-        - 第一生命
-        - 日本生命
-        - 明治安田生命
-        - かんぽ生命
-        - トーア再保険
-
-    - name: P2 Non-life and Reinsurance EN
-      lang: eng
-      sort_by: date
-      articles_count: 100
-      concept_uri_keys:
-        - Allianz
-        - AXA
-        - Zurich
-        - AIG
-        - Chubb
-        - Munich Re
-        - Swiss Re
-        - Hannover Re
-        - SCOR
-        - Lloyd's of London
-        - Berkshire Hathaway
-      keyword_fallback: []
-
-    - name: P2 Life and Health EN
-      lang: eng
-      sort_by: date
-      articles_count: 100
-      concept_uri_keys:
-        - MetLife
-        - Prudential Financial
-        - Manulife
-        - AFLAC Japan
-        - Generali
-        - Aviva
-      keyword_fallback:
-        - "Sun Life"
-        - "Aegon"
-
-    - name: Sector EN
-      lang: eng
-      sort_by: date
-      articles_count: 100
-      concept_uri_keys: []
-      keyword_fallback:
-        - reinsurance
-        - "insurance industry"
-        - "catastrophe bond"
-        - ILS
-        - "insurance regulation"
-        - "insurance M&A"
-
-    - name: Sector JP
-      lang: jpn
-      sort_by: date
-      articles_count: 100
-      concept_uri_keys: []
-      keyword_fallback:
-        - 再保険
-        - 損害保険業界
-        - 生命保険業界
-        - 保険規制
-        - 保険業法
+    - name: insurance sector research (JP-focused)
+      model: claude-opus-4-7
+      cadence_hours: 12          # ~twice per day; no separate scheduler job
+      tier: 1                    # tier-1 sources bypass the relevance gate
+      max_headlines: 30
+      max_search_uses: 12

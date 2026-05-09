@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from .budget import BudgetConfig, BudgetGuard
 from .classifier import classify
 from .config import (
     Config,
@@ -24,7 +23,8 @@ from .config import (
 from .mailer import Mailer, MailerConfig
 from .relevance import is_relevant
 from .sources.base import RawItem, Source
-from .sources.newsapi import NewsApiSource
+from .sources.claude_research import ClaudeResearchSource
+from .sources.newsapi import NewsApiSource  # retained but no longer instantiated
 from .sources.rss import RSSSource
 from .store import Store
 
@@ -95,14 +95,15 @@ def build_sources(
     feeds: Feeds,
     secrets: Secrets,
     *,
-    budget: BudgetGuard | None,
-    first_run: bool,
+    store: Store,
+    first_run: bool = False,
 ) -> list[Source]:
-    """Build the per-cycle source list from feeds.yaml + concept_uris.yaml.
+    """Build the per-cycle source list from feeds.yaml.
 
     Two layers:
-      - native_rss     — every cycle, free
-      - newsapi        — every cycle if API key + budget present
+      - native_rss        — every cycle, free
+      - claude_research   — Claude Opus 4.7 + web_search; cadence-gated
+                            (typically 12h) so only fires ~twice per day.
     """
     sources: list[Source] = []
 
@@ -117,77 +118,33 @@ def build_sources(
             )
         )
 
-    # Layer 2: NewsAPI.ai (skip if no key — graceful degradation)
-    if not secrets.newsapi_ai_key:
+    # Layer 2: Claude Opus 4.7 + web_search (curated research). Phase 8.
+    # Replaces the prior NewsAPI.ai layer entirely. Cadence-gated per query
+    # (typically 12h) so the hourly fetch_cycle invokes it but it only
+    # actually fires twice per day.
+    if not secrets.anthropic_api_key:
         log.warning(
-            "newsapi.disabled",
-            reason="NEWSAPI_AI_KEY not set; running native_rss only",
+            "claude_research.disabled",
+            reason="ANTHROPIC_API_KEY not set; running native_rss only",
         )
         return sources
 
-    if budget is None:
-        log.warning("newsapi.disabled", reason="no budget guard supplied")
-        return sources
-
-    # Resolve concept URIs from cache
-    try:
-        concept_uris = load_concept_uris(config.concept_uris_path)
-    except FileNotFoundError:
-        log.warning(
-            "concept_uris.missing",
-            path=str(config.concept_uris_path),
-            hint="run scripts/resolve_concept_uris.py to populate",
-        )
-        from .config import ConceptUris
-
-        concept_uris = ConceptUris(resolved={}, unresolved=[])
-
-    # Build an alias index from watchlists.yaml so unresolved entities fall
-    # back to disambiguating keywords (e.g. "Aviva plc" rather than just
-    # "Aviva", which collides with rugby coverage).
-    watchlists = load_watchlists(config.watchlists_path)
-    alias_index: dict[str, list[str]] = {}
-    for entry in watchlists.p1_japan + watchlists.p2_global:
-        alias_index[entry.canonical] = [entry.canonical, *entry.aliases]
-
-    date_start, date_end = _compute_date_window(first_run)
-    for q in feeds.newsapi.queries:
-        uris = [
-            concept_uris.resolved[k]
-            for k in q.concept_uri_keys
-            if k in concept_uris.resolved
-        ]
-        # Entities that didn't resolve fall back to keyword matching using
-        # canonical + all aliases so ambiguous names get disambiguated.
-        unresolved_keywords: list[str] = []
-        for k in q.concept_uri_keys:
-            if k in concept_uris.resolved:
-                continue
-            unresolved_keywords.extend(alias_index.get(k, [k]))
-        keywords = list(q.keyword_fallback) + unresolved_keywords
-
+    for q in feeds.claude_research.queries:
         sources.append(
-            NewsApiSource(
-                name=f"NewsAPI: {q.name}",
-                api_key=secrets.newsapi_ai_key,
-                lang=q.lang,
-                concept_uris=uris,
-                keywords=keywords,
-                keyword_oper=q.keyword_oper,
-                articles_count=q.articles_count,
-                articles_sort_by=q.sort_by,
-                date_start=date_start,
-                date_end=date_end,
+            ClaudeResearchSource(
+                name=f"Claude Research: {q.name}",
+                api_key=secrets.anthropic_api_key,
+                model=q.model,
+                cadence_hours=q.cadence_hours,
                 tier=q.tier,
-                budget=budget,
+                max_headlines=q.max_headlines,
+                max_search_uses=q.max_search_uses,
+                store=store,
             )
         )
     log.info(
-        "newsapi.queries.built",
-        count=len([s for s in sources if isinstance(s, NewsApiSource)]),
-        first_run=first_run,
-        date_start=date_start,
-        date_end=date_end,
+        "claude_research.queries.built",
+        count=len(feeds.claude_research.queries),
     )
     return sources
 
@@ -251,7 +208,7 @@ def _format_stats_block(
     counts: dict,
     failed_feeds: list[tuple[str, str]],
     sources_total: int,
-    budget: BudgetGuard | None,
+    store: Store | None = None,
     timezone_name: str = "Asia/Tokyo",
 ) -> str:
     now_local = datetime.now(ZoneInfo(timezone_name))
@@ -275,16 +232,14 @@ def _format_stats_block(
         f"  P1 alerts queued: {counts.get('p1', 0)}",
         f"  Next run: {next_run:%H:%M %Z}",
     ]
-    if budget is not None:
-        usage = budget.usage_summary()
-        lines.append("")
-        lines.append(
-            f"  API budget (rolling 30d): {usage['used_30d']:,} / {usage['monthly_cap']:,} "
-            f"({100 * usage['used_30d'] / max(usage['monthly_cap'], 1):.1f}%)"
-        )
-        lines.append(
-            f"  Today so far: {usage['today']} / {usage['daily_soft_warning']} soft"
-        )
+    if store is not None:
+        anth_30d = store.api_call_count(provider="anthropic", hours=24 * 30)
+        anth_today = store.api_call_count_today(provider="anthropic", timezone_name=timezone_name)
+        if anth_30d > 0:
+            lines.append("")
+            lines.append(
+                f"  Anthropic calls (rolling 30d): {anth_30d} | today: {anth_today}"
+            )
     return "\n".join(lines)
 
 
@@ -302,20 +257,15 @@ def fetch_cycle(
     feeds: Feeds,
     secrets: Secrets,
     store: Store,
-    *,
-    budget: BudgetGuard | None,
 ) -> dict:
-    """Phase 7 fetch_cycle. Reads feeds.yaml; native + NewsAPI layers; per-feed
-    stats + cycle-end summary block.
+    """Phase 8 fetch_cycle. Reads feeds.yaml; native_rss + claude_research
+    layers; per-feed stats + cycle-end summary block.
     """
     cycle_started = datetime.now(timezone.utc)
     first_run = store.is_first_run()
 
-    if budget is not None:
-        budget.reset_cycle()
-
     sources = build_sources(
-        config, feeds, secrets, budget=budget, first_run=first_run
+        config, feeds, secrets, store=store, first_run=first_run
     )
 
     counts = {
@@ -409,7 +359,7 @@ def fetch_cycle(
         counts=counts,
         failed_feeds=failed_feeds,
         sources_total=len(sources),
-        budget=budget,
+        store=store,
         timezone_name=config.scheduler.timezone,
     )
     print(block)
@@ -426,21 +376,8 @@ def run_once(*, dry_run: bool = False) -> dict:
     secrets = Secrets()
     store = Store(config.storage.db_path)
 
-    budget = None
-    if secrets.newsapi_ai_key:
-        bcfg = BudgetConfig(
-            provider="newsapi.ai",
-            monthly_cap=feeds.newsapi.monthly_cap,
-            per_cycle_hard_cap=feeds.newsapi.per_cycle_hard_cap,
-            daily_soft_warning=feeds.newsapi.daily_soft_warning,
-            timezone_name=feeds.newsapi.timezone,
-        )
-        budget = BudgetGuard(config=bcfg, store=store)
-
     try:
-        return fetch_cycle(
-            config, watchlists, relevance, feeds, secrets, store, budget=budget
-        )
+        return fetch_cycle(config, watchlists, relevance, feeds, secrets, store)
     finally:
         store.close()
 
@@ -498,7 +435,6 @@ def print_stats() -> int:
     try:
         feed_rows = store.all_feed_stats()
         totals = store.db_totals()
-        secrets = Secrets()
 
         print("=== feed_stats ===")
         if not feed_rows:
@@ -527,18 +463,13 @@ def print_stats() -> int:
 
         print()
         print("=== api_usage (rolling 30d) ===")
-        if secrets.newsapi_ai_key:
-            bcfg = BudgetConfig(timezone_name=config.scheduler.timezone)
-            budget = BudgetGuard(config=bcfg, store=store)
-            usage = budget.usage_summary()
-            print(
-                f"  newsapi.ai           "
-                f"{usage['used_30d']:>5} / {usage['monthly_cap']} "
-                f"({100 * usage['used_30d'] / max(usage['monthly_cap'], 1):.1f}%)"
+        for provider in ("anthropic", "newsapi.ai"):
+            n_30d = store.api_call_count(provider=provider, hours=24 * 30)
+            n_today = store.api_call_count_today(
+                provider=provider, timezone_name=config.scheduler.timezone
             )
-            print(f"  today (JST):         {usage['today']} / {usage['daily_soft_warning']} soft")
-        else:
-            print("  (NEWSAPI_AI_KEY not set; NewsAPI.ai not in use)")
+            if n_30d > 0 or provider == "anthropic":
+                print(f"  {provider:15} 30d={n_30d:>4}  today={n_today:>3}")
         return 0
     finally:
         store.close()

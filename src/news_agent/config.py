@@ -94,9 +94,24 @@ class NewsApiConfig(BaseModel):
     queries: list[NewsApiQuery] = Field(default_factory=list)
 
 
+class ClaudeResearchQuery(BaseModel):
+    name: str
+    model: str = "claude-opus-4-7"
+    cadence_hours: int = 12
+    tier: int = 1
+    max_headlines: int = 30
+    max_search_uses: int = 12
+
+
+class ClaudeResearchConfig(BaseModel):
+    monthly_token_cap: int = 2_000_000   # rough $60 ceiling at Opus rates
+    queries: list[ClaudeResearchQuery] = Field(default_factory=list)
+
+
 class Feeds(BaseModel):
     native_rss: list[NativeRSSFeed] = Field(default_factory=list)
     newsapi: NewsApiConfig = Field(default_factory=NewsApiConfig)
+    claude_research: ClaudeResearchConfig = Field(default_factory=ClaudeResearchConfig)
 
 
 class ConceptUris(BaseModel):
