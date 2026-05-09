@@ -1,0 +1,132 @@
+# Single source of truth for what to fetch.
+#
+# Two layers:
+#   native_rss      — free direct RSS feeds, run every cycle
+#   newsapi         — paid NewsAPI.ai (Event Registry), 6 calls per cycle
+#                     conceptUri-preferred, keyword fallback
+#
+# Google News RSS dropped entirely — blocked from EC2 Sydney IP.
+
+native_rss:
+  - name: Reinsurance News
+    url: https://www.reinsurancene.ws/feed/
+  - name: Artemis
+    url: https://www.artemis.bm/feed/
+  - name: Insurance Journal - International
+    url: https://www.insurancejournal.com/news/international/feed/
+  - name: Insurance Journal - National
+    url: https://www.insurancejournal.com/news/national/feed/
+  - name: Carrier Management
+    url: https://www.carriermanagement.com/feed/
+  - name: Nikkei Asia (top stories)
+    url: https://asia.nikkei.com/rss/feed/nar
+    trust_freshness: true   # RDF/RSS 1.0 with no per-item pubdate; URL+content dedup catches re-runs
+
+newsapi:
+  endpoint: https://eventregistry.org/api/v1/article/getArticles
+  monthly_cap: 4800
+  per_cycle_hard_cap: 8
+  daily_soft_warning: 200
+  timezone: Asia/Tokyo
+
+  queries:
+    # Each entry maps to one getArticles call per cycle.
+    # `concept_uri_keys` are looked up in concept_uris.yaml (resolved by setup script).
+    # `keyword_fallback` is used regardless and OR-joined with concept URIs in the query.
+
+    - name: P1 Japan EN
+      lang: eng
+      sort_by: date
+      articles_count: 100
+      concept_uri_keys:
+        - Tokio Marine
+        - Sompo
+        - MS&AD
+        - Dai-ichi Life
+        - Nippon Life
+        - Meiji Yasuda Life
+        - Japan Post Insurance
+        - Toa Re
+      keyword_fallback: []   # filled in for entities that don't resolve
+
+    - name: P1 Japan JP
+      lang: jpn
+      sort_by: date
+      articles_count: 100
+      concept_uri_keys:
+        - Tokio Marine
+        - Sompo
+        - MS&AD
+        - Dai-ichi Life
+        - Nippon Life
+        - Meiji Yasuda Life
+        - Japan Post Insurance
+        - Toa Re
+      keyword_fallback:
+        - 東京海上
+        - 損害保険ジャパン
+        - 三井住友海上
+        - あいおいニッセイ同和
+        - 第一生命
+        - 日本生命
+        - 明治安田生命
+        - かんぽ生命
+        - トーア再保険
+
+    - name: P2 Non-life and Reinsurance EN
+      lang: eng
+      sort_by: date
+      articles_count: 100
+      concept_uri_keys:
+        - Allianz
+        - AXA
+        - Zurich
+        - AIG
+        - Chubb
+        - Munich Re
+        - Swiss Re
+        - Hannover Re
+        - SCOR
+        - Lloyd's of London
+        - Berkshire Hathaway
+      keyword_fallback: []
+
+    - name: P2 Life and Health EN
+      lang: eng
+      sort_by: date
+      articles_count: 100
+      concept_uri_keys:
+        - MetLife
+        - Prudential Financial
+        - Manulife
+        - AFLAC Japan
+        - Generali
+        - Aviva
+      keyword_fallback:
+        - "Sun Life"
+        - "Aegon"
+
+    - name: Sector EN
+      lang: eng
+      sort_by: date
+      articles_count: 100
+      concept_uri_keys: []
+      keyword_fallback:
+        - reinsurance
+        - "insurance industry"
+        - "catastrophe bond"
+        - ILS
+        - "insurance regulation"
+        - "insurance M&A"
+
+    - name: Sector JP
+      lang: jpn
+      sort_by: date
+      articles_count: 100
+      concept_uri_keys: []
+      keyword_fallback:
+        - 再保険
+        - 損害保険業界
+        - 生命保険業界
+        - 保険規制
+        - 保険業法

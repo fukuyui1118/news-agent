@@ -5,7 +5,7 @@ import sys
 
 import structlog
 
-from .agent import run_digest_now, run_once, run_p1_batch_now
+from .agent import print_stats, run_digest_now, run_once, run_p1_batch_now
 from .config import load_config
 from .logging_setup import setup_logging
 
@@ -30,7 +30,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print emails to stdout instead of sending via SMTP.",
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print feed_stats + DB totals + api_usage summary and exit (no fetch).",
+    )
     args = parser.parse_args(argv)
+
+    if args.stats:
+        # Stats readout doesn't need full structlog setup — print directly.
+        return print_stats()
 
     config = load_config()
     setup_logging(config.logging.log_path, config.logging.level)

@@ -60,6 +60,50 @@ class TopicQueries(BaseModel):
     queries: list[TopicQuery]
 
 
+# ----- Phase 7: feeds.yaml + concept_uris.yaml -----------------------------
+
+
+class NativeRSSFeed(BaseModel):
+    name: str
+    url: str
+    tier: int = 2
+    # Some feeds (e.g. Nikkei Asia RDF/RSS 1.0) ship no per-item pubdate.
+    # When trust_freshness is true, items without a parseable pubdate are
+    # tagged as "fresh at fetch time" so they survive the 24h filter.
+    # Safe because URL and content-hash dedup catch re-publications.
+    trust_freshness: bool = False
+
+
+class NewsApiQuery(BaseModel):
+    name: str
+    lang: Literal["eng", "jpn"]
+    sort_by: Literal["date", "rel", "sourceImportance"] = "date"
+    articles_count: int = 100
+    concept_uri_keys: list[str] = Field(default_factory=list)
+    keyword_fallback: list[str] = Field(default_factory=list)
+    keyword_oper: Literal["or", "and"] = "or"
+    tier: int = 2
+
+
+class NewsApiConfig(BaseModel):
+    endpoint: str = "https://eventregistry.org/api/v1/article/getArticles"
+    monthly_cap: int = 4800
+    per_cycle_hard_cap: int = 8
+    daily_soft_warning: int = 200
+    timezone: str = "Asia/Tokyo"
+    queries: list[NewsApiQuery] = Field(default_factory=list)
+
+
+class Feeds(BaseModel):
+    native_rss: list[NativeRSSFeed] = Field(default_factory=list)
+    newsapi: NewsApiConfig = Field(default_factory=NewsApiConfig)
+
+
+class ConceptUris(BaseModel):
+    resolved: dict[str, str] = Field(default_factory=dict)
+    unresolved: list[str] = Field(default_factory=list)
+
+
 class Collection(BaseModel):
     recency_hours: int = 24
     fetch_concurrency: int = 10
@@ -74,13 +118,15 @@ class Scheduler(BaseModel):
 
 
 class Config(BaseModel):
-    sources: list[Source]
+    # Phase 7: sources moved to feeds.yaml. Kept here for backwards compat
+    # with older config.yaml files; defaults to empty list.
+    sources: list[Source] = Field(default_factory=list)
     storage: Storage = Field(default_factory=Storage)
     logging: Logging = Field(default_factory=Logging)
     watchlists_path: Path = Path("config/watchlists.yaml")
     relevance_path: Path = Path("config/relevance.yaml")
-    query_buckets_path: Path = Path("config/query_buckets.yaml")
-    topic_queries_path: Path = Path("config/topic_queries.yaml")
+    feeds_path: Path = Path("config/feeds.yaml")
+    concept_uris_path: Path = Path("config/concept_uris.yaml")
     scheduler: Scheduler = Field(default_factory=Scheduler)
     collection: Collection = Field(default_factory=Collection)
 
@@ -97,6 +143,7 @@ class Secrets(BaseSettings):
     nikkei_user: str = ""
     nikkei_pass: str = ""
     browser_use_model: str = "claude-sonnet-4-5"
+    newsapi_ai_key: str = ""
 
 
 def load_config(path: Path = Path("config/config.yaml")) -> Config:
@@ -122,3 +169,14 @@ def load_buckets(path: Path) -> Buckets:
 def load_topic_queries(path: Path) -> TopicQueries:
     with open(path) as f:
         return TopicQueries.model_validate(yaml.safe_load(f))
+
+
+def load_feeds(path: Path) -> Feeds:
+    with open(path) as f:
+        return Feeds.model_validate(yaml.safe_load(f))
+
+
+def load_concept_uris(path: Path) -> ConceptUris:
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+        return ConceptUris.model_validate(data)

@@ -1,35 +1,3 @@
-sources:
-  # ---- Static English RSS feeds ----
-  - name: Insurance Journal International
-    type: rss
-    url: https://www.insurancejournal.com/news/international/feed/
-    tier: 3
-    enabled: true
-  - name: Reinsurance News
-    type: rss
-    url: https://www.reinsurancene.ws/feed/
-    tier: 2
-    enabled: true
-  - name: Artemis
-    type: rss
-    url: https://www.artemis.bm/feed/
-    tier: 2
-    enabled: true
-
-  # ---- Direct Nikkei scrape (disabled; auth blocked by bot detection) ----
-  - name: Nikkei 金融・保険
-    type: browser_use
-    url: https://www.nikkei.com/business/finance/insurance/
-    tier: 2
-    enabled: false
-
-  # NOTE (Phase 6):
-  # Google News RSS queries are no longer listed here. They're auto-generated at
-  # runtime as one query per (entity in watchlists.yaml) × (bucket in
-  # query_buckets.yaml) — currently 54 entities × 8 buckets = 432 queries per
-  # fetch cycle. To expand coverage, add entities to watchlists.yaml or buckets
-  # to query_buckets.yaml. No code changes needed.
-
 storage:
   db_path: seen.db
 
@@ -39,12 +7,12 @@ logging:
 
 watchlists_path: config/watchlists.yaml
 relevance_path: config/relevance.yaml
-query_buckets_path: config/query_buckets.yaml
-topic_queries_path: config/topic_queries.yaml
+feeds_path: config/feeds.yaml
+concept_uris_path: config/concept_uris.yaml
 
 collection:
-  recency_hours: 24       # passed into Google's `when:Nh` operator + post-fetch filter
-  fetch_concurrency: 10   # parallel HTTP requests per fetch cycle
+  recency_hours: 24       # post-fetch defensive filter
+  fetch_concurrency: 10   # parallel fetches per cycle
 
 scheduler:
   fetch_interval_minutes: 60

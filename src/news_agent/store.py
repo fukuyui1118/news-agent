@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -40,6 +40,19 @@ def hash_item(canonical_url: str, title: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
+def content_hash(title: str, body: str) -> str:
+    """SHA256 of (normalized title + first 200 chars of normalized body).
+
+    Catches the same article published under different URLs by NewsAPI vs a
+    direct RSS feed. Robust to whitespace and case but sensitive to wording —
+    won't false-merge two unrelated stories.
+    """
+    norm_title = " ".join((title or "").lower().split())
+    norm_body = " ".join((body or "").lower().split())[:200]
+    key = norm_title + "\x01" + norm_body
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seen (
     url_hash TEXT PRIMARY KEY,
@@ -51,10 +64,38 @@ CREATE TABLE IF NOT EXISTS seen (
     priority TEXT NOT NULL,
     summary TEXT,
     emailed_at TEXT,
-    dropped_reason TEXT
+    dropped_reason TEXT,
+    content_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_seen_priority_emailed
     ON seen(priority, emailed_at);
+CREATE INDEX IF NOT EXISTS idx_seen_content_hash
+    ON seen(content_hash);
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    called_at   TEXT    NOT NULL,
+    provider    TEXT    NOT NULL,
+    endpoint    TEXT    NOT NULL,
+    query_name  TEXT,
+    article_count INTEGER,
+    elapsed_ms  INTEGER,
+    http_status INTEGER,
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_api_usage_called_at ON api_usage(called_at);
+CREATE INDEX IF NOT EXISTS idx_api_usage_provider_endpoint
+    ON api_usage(provider, endpoint);
+
+CREATE TABLE IF NOT EXISTS feed_stats (
+    feed_name                  TEXT PRIMARY KEY,
+    last_success_at            TEXT,
+    last_failure_at            TEXT,
+    last_error                 TEXT,
+    items_returned_last_run    INTEGER DEFAULT 0,
+    items_classified_last_run  INTEGER DEFAULT 0,
+    consecutive_failures       INTEGER DEFAULT 0
+);
 """
 
 
@@ -73,7 +114,13 @@ class Store:
         db_path = Path(db_path)
         if db_path.parent and str(db_path.parent) not in ("", "."):
             db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        # check_same_thread=False so async sources running in worker threads
+        # (via asyncio.to_thread) can write api_usage rows. SQLite serializes
+        # writes via its own locking; isolation_level remains default (auto).
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        # WAL mode gives concurrent readers + a single writer without conflict;
+        # safer for the multi-threaded fetch + dashboard read pattern.
+        self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
         self._migrate()
         # Index on collected_at is created after migration to avoid referencing
@@ -92,6 +139,12 @@ class Store:
         if "fetched_at" in cols and "collected_at" not in cols:
             self.conn.execute("ALTER TABLE seen RENAME COLUMN fetched_at TO collected_at")
             self.conn.execute("DROP INDEX IF EXISTS idx_seen_fetched_at")
+        # Phase 7: cross-source dedup via content_hash.
+        if "content_hash" not in cols:
+            self.conn.execute("ALTER TABLE seen ADD COLUMN content_hash TEXT")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_seen_content_hash ON seen(content_hash)"
+            )
 
     def insert_if_new(
         self,
@@ -102,15 +155,31 @@ class Store:
         published_at: datetime | None,
         priority: str,
         dropped_reason: str | None = None,
+        body: str = "",
     ) -> str | None:
-        """Insert a row. Returns the url_hash on insert, or None if duplicate."""
+        """Insert a row. Returns url_hash on insert, or None if duplicate.
+
+        Two-layer dedup: by url_hash (primary key) and by content_hash (covers
+        the same article appearing from NewsAPI.ai AND a native RSS feed under
+        different URLs).
+        """
         canonical = canonicalize_url(url)
         h = hash_item(canonical, title)
+        c_hash = content_hash(title, body)
+
+        # Cross-source dedup: bail if content_hash already present.
+        existing = self.conn.execute(
+            "SELECT 1 FROM seen WHERE content_hash = ? LIMIT 1", (c_hash,)
+        ).fetchone()
+        if existing:
+            return None
+
         cur = self.conn.execute(
             """
             INSERT OR IGNORE INTO seen
-                (url_hash, url, title, source, collected_at, published_at, priority, dropped_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (url_hash, url, title, source, collected_at, published_at,
+                 priority, dropped_reason, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 h,
@@ -121,6 +190,7 @@ class Store:
                 published_at.isoformat() if published_at else None,
                 priority,
                 dropped_reason,
+                c_hash,
             ),
         )
         self.conn.commit()
@@ -211,6 +281,160 @@ class Store:
             ),
         )
         self.conn.commit()
+
+    # ----- api_usage --------------------------------------------------------
+
+    def record_api_call(
+        self,
+        *,
+        provider: str,
+        endpoint: str,
+        query_name: str | None = None,
+        article_count: int | None = None,
+        elapsed_ms: int | None = None,
+        http_status: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO api_usage
+                (called_at, provider, endpoint, query_name, article_count,
+                 elapsed_ms, http_status, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                provider,
+                endpoint,
+                query_name,
+                article_count,
+                elapsed_ms,
+                http_status,
+                error,
+            ),
+        )
+        self.conn.commit()
+
+    def api_call_count(self, *, provider: str, hours: int) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cur = self.conn.execute(
+            "SELECT COUNT(*) FROM api_usage WHERE provider = ? AND called_at > ?",
+            (provider, cutoff.isoformat()),
+        )
+        return cur.fetchone()[0]
+
+    def api_call_count_today(self, *, provider: str, timezone_name: str = "Asia/Tokyo") -> int:
+        from zoneinfo import ZoneInfo
+
+        local = datetime.now(ZoneInfo(timezone_name))
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_utc = midnight.astimezone(timezone.utc)
+        cur = self.conn.execute(
+            "SELECT COUNT(*) FROM api_usage WHERE provider = ? AND called_at >= ?",
+            (provider, cutoff_utc.isoformat()),
+        )
+        return cur.fetchone()[0]
+
+    # ----- feed_stats -------------------------------------------------------
+
+    def update_feed_stats(
+        self,
+        *,
+        feed_name: str,
+        success: bool,
+        items_returned: int = 0,
+        items_classified: int = 0,
+        error: str | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        # UPSERT: insert if missing, update if present.
+        if success:
+            self.conn.execute(
+                """
+                INSERT INTO feed_stats (
+                    feed_name, last_success_at, items_returned_last_run,
+                    items_classified_last_run, consecutive_failures,
+                    last_failure_at, last_error
+                )
+                VALUES (?, ?, ?, ?, 0,
+                        (SELECT last_failure_at FROM feed_stats WHERE feed_name = ?),
+                        (SELECT last_error      FROM feed_stats WHERE feed_name = ?))
+                ON CONFLICT(feed_name) DO UPDATE SET
+                    last_success_at           = excluded.last_success_at,
+                    items_returned_last_run   = excluded.items_returned_last_run,
+                    items_classified_last_run = excluded.items_classified_last_run,
+                    consecutive_failures      = 0
+                """,
+                (feed_name, now, items_returned, items_classified, feed_name, feed_name),
+            )
+        else:
+            self.conn.execute(
+                """
+                INSERT INTO feed_stats (
+                    feed_name, last_failure_at, last_error,
+                    items_returned_last_run, items_classified_last_run,
+                    consecutive_failures, last_success_at
+                )
+                VALUES (?, ?, ?, 0, 0, 1, NULL)
+                ON CONFLICT(feed_name) DO UPDATE SET
+                    last_failure_at           = excluded.last_failure_at,
+                    last_error                = excluded.last_error,
+                    items_returned_last_run   = 0,
+                    items_classified_last_run = 0,
+                    consecutive_failures      = feed_stats.consecutive_failures + 1
+                """,
+                (feed_name, now, error or ""),
+            )
+        self.conn.commit()
+
+    def all_feed_stats(self) -> list[dict]:
+        cur = self.conn.execute(
+            """
+            SELECT feed_name, last_success_at, last_failure_at, last_error,
+                   items_returned_last_run, items_classified_last_run,
+                   consecutive_failures
+            FROM feed_stats
+            ORDER BY feed_name
+            """
+        )
+        cols = [
+            "feed_name", "last_success_at", "last_failure_at", "last_error",
+            "items_returned_last_run", "items_classified_last_run",
+            "consecutive_failures",
+        ]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def is_first_run(self, *, threshold_hours: int = 6) -> bool:
+        """True if `seen` table is empty or no rows collected in last `threshold_hours`."""
+        cur = self.conn.execute("SELECT MAX(collected_at) FROM seen")
+        row = cur.fetchone()
+        last = row[0] if row else None
+        if not last:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last)
+        except ValueError:
+            return True
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last_dt) > timedelta(hours=threshold_hours)
+
+    def db_totals(self) -> dict:
+        out = {}
+        for window_label, hours in [("24h", 24), ("7d", 24 * 7), ("all", None)]:
+            for priority in ("P1", "P2", "P3", "DROPPED"):
+                if hours is None:
+                    cur = self.conn.execute(
+                        "SELECT COUNT(*) FROM seen WHERE priority = ?", (priority,)
+                    )
+                else:
+                    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+                    cur = self.conn.execute(
+                        "SELECT COUNT(*) FROM seen WHERE priority = ? AND collected_at > ?",
+                        (priority, cutoff.isoformat()),
+                    )
+                out[f"{priority.lower()}_{window_label}"] = cur.fetchone()[0]
+        return out
 
     def close(self) -> None:
         self.conn.close()

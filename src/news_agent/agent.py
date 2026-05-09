@@ -2,24 +2,29 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import structlog
 
+from .budget import BudgetConfig, BudgetGuard
 from .classifier import classify
 from .config import (
     Config,
+    Feeds,
     Relevance,
     Secrets,
     Watchlists,
-    load_buckets,
+    load_concept_uris,
     load_config,
+    load_feeds,
     load_relevance,
-    load_topic_queries,
     load_watchlists,
 )
 from .mailer import Mailer, MailerConfig
 from .relevance import is_relevant
 from .sources.base import RawItem, Source
+from .sources.newsapi import NewsApiSource
 from .sources.rss import RSSSource
 from .store import Store
 
@@ -31,9 +36,9 @@ def apply_recency_filter(
 ) -> tuple[list[RawItem], int, int]:
     """Filter to items published within the last `recency_hours`.
 
-    Items with `published_at` of None or a naive datetime are skipped with a
-    `source.no_pubdate` warning (counted as `no_pubdate`). Items older than the
-    threshold are skipped with a `story.too_old` info log (counted as `too_old`).
+    Items with no/naive `published_at` → `source.no_pubdate` warning, counted
+    as `no_pubdate`. Items older than the threshold → `story.too_old` info,
+    counted as `too_old`.
     """
     now = datetime.now(timezone.utc)
     threshold = now - timedelta(hours=recency_hours)
@@ -45,10 +50,7 @@ def apply_recency_filter(
         if pub is None or pub.tzinfo is None:
             no_pubdate += 1
             log.warning(
-                "source.no_pubdate",
-                source=item.source,
-                title=item.title,
-                url=item.url,
+                "source.no_pubdate", source=item.source, title=item.title, url=item.url
             )
             continue
         if pub < threshold:
@@ -70,136 +72,127 @@ RECENCY_HOURS = 24
 
 def _normalize_text(text: str) -> str:
     return (
-        text.replace("’", "'")
+        (text or "")
+        .replace("’", "'")
         .replace("‘", "'")
         .replace("“", '"')
         .replace("”", '"')
     )
 
 
-def build_sources(config: Config) -> list[Source]:
-    """Combine static (YAML-defined) sources with auto-generated Google News
-    queries (every watchlist entity × every keyword bucket).
+def _compute_date_window(first_run: bool) -> tuple[str, str]:
+    """Return (dateStart, dateEnd) as YYYY-MM-DD for NewsAPI.ai queries."""
+    end = datetime.now(timezone.utc)
+    if first_run:
+        start = end - timedelta(hours=24)
+    else:
+        start = end - timedelta(hours=2)  # small buffer for indexing lag
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
+def build_sources(
+    config: Config,
+    feeds: Feeds,
+    secrets: Secrets,
+    *,
+    budget: BudgetGuard | None,
+    first_run: bool,
+) -> list[Source]:
+    """Build the per-cycle source list from feeds.yaml + concept_uris.yaml.
+
+    Two layers:
+      - native_rss     — every cycle, free
+      - newsapi        — every cycle if API key + budget present
     """
-    import urllib.parse
-
-    from .query_builder import generate_google_news_queries
-
     sources: list[Source] = []
-    secrets: Secrets | None = None
 
-    # Static sources from config.yaml
-    for src in config.sources:
-        if not src.enabled:
-            continue
-        if src.type == "rss":
-            sources.append(RSSSource(name=src.name, url=src.url, tier=src.tier))
-        elif src.type == "google_news_rss":
-            # Legacy hand-crafted query rows. Phase 6 prefers auto-generation,
-            # but keep this branch so config.yaml can hold one-offs if needed.
-            if not src.query:
-                log.warning("source.google_news.no_query", name=src.name)
-                continue
-            encoded = urllib.parse.quote(src.query)
-            url = (
-                f"https://news.google.com/rss/search?"
-                f"q={encoded}&hl=ja&gl=JP&ceid=JP:ja"
-            )
-            sources.append(RSSSource(name=src.name, url=url, tier=src.tier))
-        elif src.type == "browser_use":
-            from .sources.nikkei import NikkeiSource
-
-            if secrets is None:
-                secrets = Secrets()
-            sources.append(
-                NikkeiSource(
-                    name=src.name,
-                    url=src.url,
-                    tier=src.tier,
-                    nikkei_user=secrets.nikkei_user,
-                    nikkei_pass=secrets.nikkei_pass,
-                    browser_use_model=secrets.browser_use_model,
-                    anthropic_api_key=secrets.anthropic_api_key,
-                )
-            )
-        else:
-            log.warning("source.type.unsupported", type=src.type, name=src.name)
-
-    # Auto-generated Google News queries: every watchlist entity × every bucket
-    watchlists = load_watchlists(config.watchlists_path)
-    buckets = load_buckets(config.query_buckets_path)
-    queries = generate_google_news_queries(
-        watchlists=watchlists,
-        buckets=buckets.buckets,
-        recency_hours=config.collection.recency_hours,
-    )
-    log.info(
-        "query_builder.generated",
-        count=len(queries),
-        entities=len(watchlists.p1_japan) + len(watchlists.p2_global),
-        buckets=len(buckets.buckets),
-        recency_hours=config.collection.recency_hours,
-    )
-    for q in queries:
-        encoded = urllib.parse.quote(q.query)
-        url = f"https://news.google.com/rss/search?q={encoded}&hl=ja&gl=JP&ceid=JP:ja"
+    # Layer 1: native RSS
+    for nf in feeds.native_rss:
         sources.append(
             RSSSource(
-                name=f"GN: {q.entity_priority} {q.entity_canonical} / {q.bucket_name}",
-                url=url,
-                tier=2,
+                name=nf.name,
+                url=nf.url,
+                tier=nf.tier,
+                trust_freshness=nf.trust_freshness,
             )
         )
 
-    # Topic queries: broad sector / regulation / market-trend coverage that
-    # complements entity×bucket. Catches stories where no specific entity is
-    # named (e.g. industry regulation, IPOs of unfamiliar carriers, market
-    # structure shifts). Phase 6.y.
+    # Layer 2: NewsAPI.ai (skip if no key — graceful degradation)
+    if not secrets.newsapi_ai_key:
+        log.warning(
+            "newsapi.disabled",
+            reason="NEWSAPI_AI_KEY not set; running native_rss only",
+        )
+        return sources
+
+    if budget is None:
+        log.warning("newsapi.disabled", reason="no budget guard supplied")
+        return sources
+
+    # Resolve concept URIs from cache
     try:
-        topic_queries = load_topic_queries(config.topic_queries_path)
+        concept_uris = load_concept_uris(config.concept_uris_path)
     except FileNotFoundError:
-        topic_queries = None
+        log.warning(
+            "concept_uris.missing",
+            path=str(config.concept_uris_path),
+            hint="run scripts/resolve_concept_uris.py to populate",
+        )
+        from .config import ConceptUris
 
-    if topic_queries is not None:
-        log.info("topic_queries.loaded", count=len(topic_queries.queries))
-        recency = config.collection.recency_hours
-        for tq in topic_queries.queries:
-            full_query = f"{tq.query} when:{recency}h"
-            encoded = urllib.parse.quote(full_query)
-            url = f"https://news.google.com/rss/search?q={encoded}&hl=ja&gl=JP&ceid=JP:ja"
-            sources.append(
-                RSSSource(
-                    name=f"GN-Topic: {tq.name}",
-                    url=url,
-                    tier=tq.tier,
-                )
+        concept_uris = ConceptUris(resolved={}, unresolved=[])
+
+    # Build an alias index from watchlists.yaml so unresolved entities fall
+    # back to disambiguating keywords (e.g. "Aviva plc" rather than just
+    # "Aviva", which collides with rugby coverage).
+    watchlists = load_watchlists(config.watchlists_path)
+    alias_index: dict[str, list[str]] = {}
+    for entry in watchlists.p1_japan + watchlists.p2_global:
+        alias_index[entry.canonical] = [entry.canonical, *entry.aliases]
+
+    date_start, date_end = _compute_date_window(first_run)
+    for q in feeds.newsapi.queries:
+        uris = [
+            concept_uris.resolved[k]
+            for k in q.concept_uri_keys
+            if k in concept_uris.resolved
+        ]
+        # Entities that didn't resolve fall back to keyword matching using
+        # canonical + all aliases so ambiguous names get disambiguated.
+        unresolved_keywords: list[str] = []
+        for k in q.concept_uri_keys:
+            if k in concept_uris.resolved:
+                continue
+            unresolved_keywords.extend(alias_index.get(k, [k]))
+        keywords = list(q.keyword_fallback) + unresolved_keywords
+
+        sources.append(
+            NewsApiSource(
+                name=f"NewsAPI: {q.name}",
+                api_key=secrets.newsapi_ai_key,
+                lang=q.lang,
+                concept_uris=uris,
+                keywords=keywords,
+                keyword_oper=q.keyword_oper,
+                articles_count=q.articles_count,
+                articles_sort_by=q.sort_by,
+                date_start=date_start,
+                date_end=date_end,
+                tier=q.tier,
+                budget=budget,
             )
-
+        )
+    log.info(
+        "newsapi.queries.built",
+        count=len([s for s in sources if isinstance(s, NewsApiSource)]),
+        first_run=first_run,
+        date_start=date_start,
+        date_end=date_end,
+    )
     return sources
 
 
-async def _fetch_one(
-    source: Source, sem: asyncio.Semaphore
-) -> tuple[Source, list[RawItem], BaseException | None]:
-    async with sem:
-        try:
-            items = await asyncio.to_thread(source.fetch)
-            return source, items, None
-        except BaseException as e:  # catch broadly; isolated per source
-            return source, [], e
-
-
-async def _fetch_all(
-    sources: list[Source], concurrency: int
-) -> list[tuple[Source, list[RawItem], BaseException | None]]:
-    sem = asyncio.Semaphore(concurrency)
-    return await asyncio.gather(*(_fetch_one(s, sem) for s in sources))
-
-
 def _build_runtime_components(*, dry_run: bool) -> tuple[object | None, Mailer | None]:
-    """Returns (summarizer, mailer). Summarizer is created lazily — its import
-    pulls in `anthropic`, which we don't want to do for fetch-only cycles.
-    """
     secrets = Secrets()
     summarizer = None
     if secrets.anthropic_api_key:
@@ -234,60 +227,138 @@ def _build_runtime_components(*, dry_run: bool) -> tuple[object | None, Mailer |
     return summarizer, mailer
 
 
+async def _fetch_one(
+    source: Source, sem: asyncio.Semaphore
+) -> tuple[Source, list[RawItem], BaseException | None]:
+    async with sem:
+        try:
+            items = await asyncio.to_thread(source.fetch)
+            return source, items, None
+        except BaseException as e:
+            return source, [], e
+
+
+async def _fetch_all(
+    sources: list[Source], concurrency: int
+) -> list[tuple[Source, list[RawItem], BaseException | None]]:
+    sem = asyncio.Semaphore(concurrency)
+    return await asyncio.gather(*(_fetch_one(s, sem) for s in sources))
+
+
+def _format_stats_block(
+    *,
+    cycle_seconds: float,
+    counts: dict,
+    failed_feeds: list[tuple[str, str]],
+    sources_total: int,
+    budget: BudgetGuard | None,
+    timezone_name: str = "Asia/Tokyo",
+) -> str:
+    now_local = datetime.now(ZoneInfo(timezone_name))
+    feeds_ok = sources_total - len(failed_feeds)
+    failure_summary = ""
+    if failed_feeds:
+        first = failed_feeds[0]
+        failure_summary = f" ({len(failed_feeds)} failed: {first[0]} — {first[1][:60]})"
+    next_run = (now_local + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+    lines = [
+        f"[{now_local:%Y-%m-%d %H:%M:%S} {now_local.tzname()}] Cycle complete in {cycle_seconds:.1f}s",
+        f"  Feeds fetched: {feeds_ok}/{sources_total}{failure_summary}",
+        f"  Items seen (raw): {counts.get('raw', 0):,}",
+        f"  Items new (not in DB): {counts.get('new', 0):,}",
+        f"  After 24h published_at filter: {counts.get('after_recency', 0):,}",
+        f"  Classified: P1={counts.get('p1', 0)}, "
+        f"P2={counts.get('p2', 0)}, "
+        f"P3={counts.get('p3', 0)}, "
+        f"discarded={counts.get('dropped', 0)}",
+        f"  P1 alerts queued: {counts.get('p1', 0)}",
+        f"  Next run: {next_run:%H:%M %Z}",
+    ]
+    if budget is not None:
+        usage = budget.usage_summary()
+        lines.append("")
+        lines.append(
+            f"  API budget (rolling 30d): {usage['used_30d']:,} / {usage['monthly_cap']:,} "
+            f"({100 * usage['used_30d'] / max(usage['monthly_cap'], 1):.1f}%)"
+        )
+        lines.append(
+            f"  Today so far: {usage['today']} / {usage['daily_soft_warning']} soft"
+        )
+    return "\n".join(lines)
+
+
+def _append_to_stats_log(block: str, log_path: Path) -> None:
+    stats_path = log_path.parent / "stats.log"
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(stats_path, "a", encoding="utf-8") as f:
+        f.write(block + "\n\n")
+
+
 def fetch_cycle(
     config: Config,
     watchlists: Watchlists,
     relevance: Relevance,
+    feeds: Feeds,
+    secrets: Secrets,
     store: Store,
-) -> dict[str, int]:
-    """Fetch + classify + persist. P1 emails happen in the 3-hour batch job (Phase 4).
-
-    Phase 5: only items published within the last 24 hours are considered for
-    classification + persistence. Older items are dropped before dedup so they
-    don't pollute the DB.
+    *,
+    budget: BudgetGuard | None,
+) -> dict:
+    """Phase 7 fetch_cycle. Reads feeds.yaml; native + NewsAPI layers; per-feed
+    stats + cycle-end summary block.
     """
+    cycle_started = datetime.now(timezone.utc)
+    first_run = store.is_first_run()
+
+    if budget is not None:
+        budget.reset_cycle()
+
+    sources = build_sources(
+        config, feeds, secrets, budget=budget, first_run=first_run
+    )
+
     counts = {
-        "sources": 0,
-        "source_errors": 0,
-        "fetched": 0,
+        "sources": len(sources),
+        "raw": 0,             # total items returned across all feeds before any filter
         "no_pubdate": 0,
         "too_old": 0,
-        "new": 0,
-        "p1": 0,
-        "p2": 0,
-        "p3": 0,
-        "dropped": 0,
+        "after_recency": 0,
+        "new": 0,             # items inserted (passed url+content dedup)
+        "p1": 0, "p2": 0, "p3": 0, "dropped": 0,
+        "first_run": first_run,
     }
-    sources = build_sources(config)
-    counts["sources"] = len(sources)
-    log.info("fetch_cycle.start", sources=len(sources), concurrency=config.collection.fetch_concurrency)
+    failed_feeds: list[tuple[str, str]] = []
+
+    log.info(
+        "fetch_cycle.start",
+        sources=len(sources),
+        concurrency=config.collection.fetch_concurrency,
+        first_run=first_run,
+    )
 
     results = asyncio.run(_fetch_all(sources, config.collection.fetch_concurrency))
 
     for source, raw_items, error in results:
+        feed_name = source.name
         if error is not None:
-            counts["source_errors"] += 1
-            log.error("source.fetch.failed", source=source.name, error=str(error))
+            failed_feeds.append((feed_name, str(error)))
+            log.error("source.fetch.failed", source=feed_name, error=str(error))
+            store.update_feed_stats(feed_name=feed_name, success=False, error=str(error))
             continue
+
+        counts["raw"] += len(raw_items)
         items, n_no_pub, n_old = apply_recency_filter(
             raw_items, recency_hours=config.collection.recency_hours
         )
         counts["no_pubdate"] += n_no_pub
         counts["too_old"] += n_old
-        if raw_items or n_no_pub or n_old:
-            log.info(
-                "source.fetched",
-                source=source.name,
-                total=len(raw_items),
-                kept=len(items),
-                no_pubdate=n_no_pub,
-                too_old=n_old,
-            )
+        counts["after_recency"] += len(items)
+
+        classified_count = 0
         for item in items:
-            counts["fetched"] += 1
             text = _normalize_text(item.title + "\n" + item.raw_text)
             match = classify(text, watchlists)
-
             priority = match.priority
             dropped_reason: str | None = None
             if priority == "P3":
@@ -303,12 +374,15 @@ def fetch_cycle(
                 published_at=item.published_at,
                 priority=priority,
                 dropped_reason=dropped_reason,
+                body=item.raw_text,
             )
             if not inserted_hash:
                 continue
 
             counts["new"] += 1
             counts[priority.lower()] += 1
+            if priority != "DROPPED":
+                classified_count += 1
             log.info(
                 "story.new",
                 priority=priority,
@@ -316,20 +390,57 @@ def fetch_cycle(
                 matched=match.matched_alias or None,
                 dropped_reason=dropped_reason,
                 source=item.source,
-                tier=item.source_tier,
                 title=item.title,
                 url=item.url,
             )
+
+        store.update_feed_stats(
+            feed_name=feed_name,
+            success=True,
+            items_returned=len(raw_items),
+            items_classified=classified_count,
+        )
+
+    cycle_seconds = (datetime.now(timezone.utc) - cycle_started).total_seconds()
+    counts["cycle_seconds"] = round(cycle_seconds, 1)
+
+    block = _format_stats_block(
+        cycle_seconds=cycle_seconds,
+        counts=counts,
+        failed_feeds=failed_feeds,
+        sources_total=len(sources),
+        budget=budget,
+        timezone_name=config.scheduler.timezone,
+    )
+    print(block)
+    _append_to_stats_log(block, config.logging.log_path)
+    log.info("cycle.done", **{k: v for k, v in counts.items() if not isinstance(v, dict)})
     return counts
 
 
-def run_once(*, dry_run: bool = False) -> dict[str, int]:
+def run_once(*, dry_run: bool = False) -> dict:
     config = load_config()
     watchlists = load_watchlists(config.watchlists_path)
     relevance = load_relevance(config.relevance_path)
+    feeds = load_feeds(config.feeds_path)
+    secrets = Secrets()
     store = Store(config.storage.db_path)
+
+    budget = None
+    if secrets.newsapi_ai_key:
+        bcfg = BudgetConfig(
+            provider="newsapi.ai",
+            monthly_cap=feeds.newsapi.monthly_cap,
+            per_cycle_hard_cap=feeds.newsapi.per_cycle_hard_cap,
+            daily_soft_warning=feeds.newsapi.daily_soft_warning,
+            timezone_name=feeds.newsapi.timezone,
+        )
+        budget = BudgetGuard(config=bcfg, store=store)
+
     try:
-        return fetch_cycle(config, watchlists, relevance, store)
+        return fetch_cycle(
+            config, watchlists, relevance, feeds, secrets, store, budget=budget
+        )
     finally:
         store.close()
 
@@ -376,5 +487,58 @@ def run_digest_now(*, dry_run: bool = False) -> dict[str, object]:
             mailer=mailer,
             timezone_name=config.scheduler.timezone,
         )
+    finally:
+        store.close()
+
+
+def print_stats() -> int:
+    """`--stats` (no fetch) — feed_stats + DB totals + api_usage summary."""
+    config = load_config()
+    store = Store(config.storage.db_path)
+    try:
+        feed_rows = store.all_feed_stats()
+        totals = store.db_totals()
+        secrets = Secrets()
+
+        print("=== feed_stats ===")
+        if not feed_rows:
+            print("  (no feeds tracked yet — run --once at least once)")
+        else:
+            print(f"  {'feed_name':40} {'last_success':20} {'last_failure':20} items_last  consec_fail")
+            for row in feed_rows:
+                print(
+                    f"  {row['feed_name'][:40]:40} "
+                    f"{(row['last_success_at'] or '—')[:19]:20} "
+                    f"{(row['last_failure_at'] or '—')[:19]:20} "
+                    f"{row['items_returned_last_run']:>10}  "
+                    f"{row['consecutive_failures']:>11}"
+                )
+
+        print()
+        print("=== DB totals ===")
+        print(f"  {'priority':10} {'24h':>8} {'7d':>8} {'all':>8}")
+        for p in ("p1", "p2", "p3", "dropped"):
+            print(
+                f"  {p.upper():10} "
+                f"{totals.get(f'{p}_24h', 0):>8} "
+                f"{totals.get(f'{p}_7d', 0):>8} "
+                f"{totals.get(f'{p}_all', 0):>8}"
+            )
+
+        print()
+        print("=== api_usage (rolling 30d) ===")
+        if secrets.newsapi_ai_key:
+            bcfg = BudgetConfig(timezone_name=config.scheduler.timezone)
+            budget = BudgetGuard(config=bcfg, store=store)
+            usage = budget.usage_summary()
+            print(
+                f"  newsapi.ai           "
+                f"{usage['used_30d']:>5} / {usage['monthly_cap']} "
+                f"({100 * usage['used_30d'] / max(usage['monthly_cap'], 1):.1f}%)"
+            )
+            print(f"  today (JST):         {usage['today']} / {usage['daily_soft_warning']} soft")
+        else:
+            print("  (NEWSAPI_AI_KEY not set; NewsAPI.ai not in use)")
+        return 0
     finally:
         store.close()

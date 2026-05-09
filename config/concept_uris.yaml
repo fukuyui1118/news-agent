@@ -1,0 +1,57 @@
+resolved:
+  AIG: http://en.wikipedia.org/wiki/American_International_Group
+  AXA: http://en.wikipedia.org/wiki/AXA
+  Allianz: http://en.wikipedia.org/wiki/Allianz
+  Beazley: http://en.wikipedia.org/wiki/Beazley_Group
+  Berkshire Hathaway: http://en.wikipedia.org/wiki/Berkshire_Hathaway
+  China Life: http://en.wikipedia.org/wiki/China_Life_Insurance_Company
+  Chubb: http://en.wikipedia.org/wiki/Chubb_Limited
+  Dai-ichi Life: http://en.wikipedia.org/wiki/Dai-ichi_Life
+  Everest Re: http://en.wikipedia.org/wiki/Everest_Re
+  Hannover Re: http://en.wikipedia.org/wiki/Hannover_Re
+  Hiscox: http://en.wikipedia.org/wiki/Hiscox
+  Japan Post Insurance: http://en.wikipedia.org/wiki/Japan_Post_Insurance
+  Legal & General: http://en.wikipedia.org/wiki/Legal_&_General
+  Liberty Mutual: http://en.wikipedia.org/wiki/Liberty_Mutual
+  Lloyd's of London: http://en.wikipedia.org/wiki/Lloyd's_of_London
+  MS&AD: http://en.wikipedia.org/wiki/MS&AD_Insurance_Group
+  Manulife: http://en.wikipedia.org/wiki/Manulife
+  Meiji Yasuda Life: http://en.wikipedia.org/wiki/Meiji_Yasuda_Life
+  MetLife: http://en.wikipedia.org/wiki/MetLife
+  Munich Re: http://en.wikipedia.org/wiki/Munich_Re
+  Nippon Life: http://en.wikipedia.org/wiki/Nippon_Life
+  Prudential Financial: http://en.wikipedia.org/wiki/Prudential_Financial
+  Prudential plc: http://en.wikipedia.org/wiki/Prudential_plc
+  RenaissanceRe: http://en.wikipedia.org/wiki/RenaissanceRe
+  Samsung Fire & Marine: http://en.wikipedia.org/wiki/Samsung_Fire_&_Marine_Insurance
+  Sompo: http://en.wikipedia.org/wiki/Sompo_Japan_Nipponkoa_Insurance
+  Sony Financial: http://en.wikipedia.org/wiki/Sony_Financial_Holdings
+  Sumitomo Life: http://en.wikipedia.org/wiki/Sumitomo_Life
+  Swiss Re: http://en.wikipedia.org/wiki/Swiss_Re
+  T&D Holdings: http://en.wikipedia.org/wiki/T&D_Holdings
+  The Hartford: http://en.wikipedia.org/wiki/The_Hartford
+  Tokio Marine: http://en.wikipedia.org/wiki/Tokio_Marine_Nichido
+  Travelers: http://en.wikipedia.org/wiki/The_Travelers_Companies
+unresolved:
+- Toa Re
+- Lifenet
+- Rakuten General Insurance
+- AFLAC Japan
+- au Insurance
+- Saison Automobile
+- Mitsui Direct
+- Fukoku Mutual Life
+- Asahi Mutual Life
+- SCOR
+- PartnerRe
+- Lancashire
+- Convex
+- Korean Re
+# Manual cleanups (auto-resolution picked the wrong entity):
+- Aviva                # picked Premiership Rugby
+- Brit                 # picked BBC
+- China Re             # picked State Council of PRC
+- Generali             # picked Generalitat de Catalunya
+- Ping An              # picked Ping An Bank (related entity)
+- SBI Insurance        # picked Indian SBI Life, not Japanese SBI 損保
+- Zurich               # picked ETH Zurich
