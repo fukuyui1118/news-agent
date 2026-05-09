@@ -148,13 +148,14 @@ filtered["status"] = filtered.apply(status_icon, axis=1)
 
 
 # ---------------------------------------------------------------- Table
-display_cols = ["status", "priority", "source", "title", "published_at", "collected_at", "emailed_at", "dropped_reason"]
+display_cols = ["status", "priority", "source", "title", "url", "published_at", "collected_at", "emailed_at", "dropped_reason"]
 display = filtered[display_cols].rename(
     columns={
         "status": "📧",
         "priority": "Pri",
         "source": "Source",
         "title": "Title",
+        "url": "🔗",
         "published_at": "Published",
         "collected_at": "Collected",
         "emailed_at": "Emailed",
@@ -168,6 +169,7 @@ st.dataframe(
     hide_index=True,
     height=420,
     column_config={
+        "🔗": st.column_config.LinkColumn(label="🔗", display_text="open"),
         "Published": st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm"),
         "Collected": st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm"),
         "Emailed": st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm"),

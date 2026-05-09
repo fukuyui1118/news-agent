@@ -51,10 +51,23 @@ python -m news_agent --dry-run               # scheduler in dry-run mode
 - `mailer.py` — Gmail SMTP via STARTTLS. Subjects/bodies in Japanese. `send_p1()` and `send_digest(payload)`.
 
 ## Config files
-- `config/config.yaml` — sources (with `tier`), `scheduler` (interval/cron/timezone), paths.
-- `config/watchlists.yaml` — P1/P2 entities with `aliases` and `exclude` lists.
-- `config/relevance.yaml` — business keywords for the relevance gate.
+- `config/config.yaml` — static sources, `scheduler`, `collection` (recency_hours, fetch_concurrency), paths.
+- `config/watchlists.yaml` — P1/P2 entities with `aliases` and `exclude` lists. **Drives query generation AND classification.**
+- `config/query_buckets.yaml` — thematic keyword buckets used to **generate** Google News queries (Phase 6).
+- `config/relevance.yaml` — business keywords for the **post-fetch relevance gate**. Independent from query_buckets.
 - `.env` — secrets only. **Must contain a Gmail app password (16 chars) for SMTP_PASSWORD, not your regular Gmail password.**
+
+## How searches work (Phase 6)
+**Searches are NOT AI-generated.** Queries are built by cross-product at runtime:
+
+- For each entity in `watchlists.yaml` (currently 54: 20 P1 + 34 P2), for each bucket in `query_buckets.yaml` (currently 8): build one Google News query `(entity aliases) (bucket keywords) when:24h`. Total = **432 queries per fetch cycle**.
+- Plus 3 static English RSS feeds (Insurance Journal, Reinsurance News, Artemis).
+- All sources fetched in parallel via `asyncio.to_thread` + `Semaphore(10)`. Cycle time ~3-5 min.
+- Claude is called only at **summary time** (P1 batch + daily digest), never at fetch time.
+
+**To expand coverage:** add entities to `watchlists.yaml` (each new entity = 8 queries), or add buckets to `query_buckets.yaml` (each new bucket = 54 queries). No code changes needed.
+
+The recency filter applies twice: once at source via Google's `when:Nh` operator (`config.yaml::collection.recency_hours`), once defensively in `agent.py::apply_recency_filter` for any stragglers and items missing pubdate.
 
 ## Source tiers
 - **Tier 1** — carrier IR / press release feeds. Gate is skipped. Currently none in RSS — Phase 3b adds HTML scraping (Tokio Marine, Sompo, MS&AD, etc.).

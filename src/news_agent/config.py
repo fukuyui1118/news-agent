@@ -41,8 +41,22 @@ class Relevance(BaseModel):
     business_keywords: list[str]
 
 
+class Bucket(BaseModel):
+    name: str
+    keywords: list[str]
+
+
+class Buckets(BaseModel):
+    buckets: list[Bucket]
+
+
+class Collection(BaseModel):
+    recency_hours: int = 24
+    fetch_concurrency: int = 10
+
+
 class Scheduler(BaseModel):
-    fetch_interval_minutes: int = 30
+    fetch_interval_minutes: int = 60
     p1_batch_interval_hours: int = 3
     digest_cron_hour: int = 7
     digest_cron_minute: int = 0
@@ -55,7 +69,9 @@ class Config(BaseModel):
     logging: Logging = Field(default_factory=Logging)
     watchlists_path: Path = Path("config/watchlists.yaml")
     relevance_path: Path = Path("config/relevance.yaml")
+    query_buckets_path: Path = Path("config/query_buckets.yaml")
     scheduler: Scheduler = Field(default_factory=Scheduler)
+    collection: Collection = Field(default_factory=Collection)
 
 
 class Secrets(BaseSettings):
@@ -85,3 +101,8 @@ def load_watchlists(path: Path) -> Watchlists:
 def load_relevance(path: Path) -> Relevance:
     with open(path) as f:
         return Relevance.model_validate(yaml.safe_load(f))
+
+
+def load_buckets(path: Path) -> Buckets:
+    with open(path) as f:
+        return Buckets.model_validate(yaml.safe_load(f))

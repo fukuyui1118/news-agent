@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import structlog
@@ -10,6 +11,7 @@ from .config import (
     Relevance,
     Secrets,
     Watchlists,
+    load_buckets,
     load_config,
     load_relevance,
     load_watchlists,
@@ -22,18 +24,18 @@ from .store import Store
 
 log = structlog.get_logger()
 
-RECENCY_HOURS = 24
 
-
-def apply_recency_filter(items: list[RawItem]) -> tuple[list[RawItem], int, int]:
-    """Filter to items published within the last RECENCY_HOURS.
+def apply_recency_filter(
+    items: list[RawItem], *, recency_hours: int = 24
+) -> tuple[list[RawItem], int, int]:
+    """Filter to items published within the last `recency_hours`.
 
     Items with `published_at` of None or a naive datetime are skipped with a
     `source.no_pubdate` warning (counted as `no_pubdate`). Items older than the
     threshold are skipped with a `story.too_old` info log (counted as `too_old`).
     """
     now = datetime.now(timezone.utc)
-    threshold = now - timedelta(hours=RECENCY_HOURS)
+    threshold = now - timedelta(hours=recency_hours)
     kept: list[RawItem] = []
     no_pubdate = 0
     too_old = 0
@@ -61,6 +63,10 @@ def apply_recency_filter(items: list[RawItem]) -> tuple[list[RawItem], int, int]
     return kept, no_pubdate, too_old
 
 
+# Backwards-compat constant for existing tests / external callers.
+RECENCY_HOURS = 24
+
+
 def _normalize_text(text: str) -> str:
     return (
         text.replace("’", "'")
@@ -71,16 +77,25 @@ def _normalize_text(text: str) -> str:
 
 
 def build_sources(config: Config) -> list[Source]:
+    """Combine static (YAML-defined) sources with auto-generated Google News
+    queries (every watchlist entity × every keyword bucket).
+    """
     import urllib.parse
+
+    from .query_builder import generate_google_news_queries
 
     sources: list[Source] = []
     secrets: Secrets | None = None
+
+    # Static sources from config.yaml
     for src in config.sources:
         if not src.enabled:
             continue
         if src.type == "rss":
             sources.append(RSSSource(name=src.name, url=src.url, tier=src.tier))
         elif src.type == "google_news_rss":
+            # Legacy hand-crafted query rows. Phase 6 prefers auto-generation,
+            # but keep this branch so config.yaml can hold one-offs if needed.
             if not src.query:
                 log.warning("source.google_news.no_query", name=src.name)
                 continue
@@ -108,7 +123,52 @@ def build_sources(config: Config) -> list[Source]:
             )
         else:
             log.warning("source.type.unsupported", type=src.type, name=src.name)
+
+    # Auto-generated Google News queries: every watchlist entity × every bucket
+    watchlists = load_watchlists(config.watchlists_path)
+    buckets = load_buckets(config.query_buckets_path)
+    queries = generate_google_news_queries(
+        watchlists=watchlists,
+        buckets=buckets.buckets,
+        recency_hours=config.collection.recency_hours,
+    )
+    log.info(
+        "query_builder.generated",
+        count=len(queries),
+        entities=len(watchlists.p1_japan) + len(watchlists.p2_global),
+        buckets=len(buckets.buckets),
+        recency_hours=config.collection.recency_hours,
+    )
+    for q in queries:
+        encoded = urllib.parse.quote(q.query)
+        url = f"https://news.google.com/rss/search?q={encoded}&hl=ja&gl=JP&ceid=JP:ja"
+        sources.append(
+            RSSSource(
+                name=f"GN: {q.entity_priority} {q.entity_canonical} / {q.bucket_name}",
+                url=url,
+                tier=2,
+            )
+        )
+
     return sources
+
+
+async def _fetch_one(
+    source: Source, sem: asyncio.Semaphore
+) -> tuple[Source, list[RawItem], BaseException | None]:
+    async with sem:
+        try:
+            items = await asyncio.to_thread(source.fetch)
+            return source, items, None
+        except BaseException as e:  # catch broadly; isolated per source
+            return source, [], e
+
+
+async def _fetch_all(
+    sources: list[Source], concurrency: int
+) -> list[tuple[Source, list[RawItem], BaseException | None]]:
+    sem = asyncio.Semaphore(concurrency)
+    return await asyncio.gather(*(_fetch_one(s, sem) for s in sources))
 
 
 def _build_runtime_components(*, dry_run: bool) -> tuple[object | None, Mailer | None]:
@@ -162,6 +222,8 @@ def fetch_cycle(
     don't pollute the DB.
     """
     counts = {
+        "sources": 0,
+        "source_errors": 0,
         "fetched": 0,
         "no_pubdate": 0,
         "too_old": 0,
@@ -171,23 +233,31 @@ def fetch_cycle(
         "p3": 0,
         "dropped": 0,
     }
-    for source in build_sources(config):
-        try:
-            raw_items = source.fetch()
-        except Exception as e:
-            log.error("source.fetch.failed", source=source.name, error=str(e))
+    sources = build_sources(config)
+    counts["sources"] = len(sources)
+    log.info("fetch_cycle.start", sources=len(sources), concurrency=config.collection.fetch_concurrency)
+
+    results = asyncio.run(_fetch_all(sources, config.collection.fetch_concurrency))
+
+    for source, raw_items, error in results:
+        if error is not None:
+            counts["source_errors"] += 1
+            log.error("source.fetch.failed", source=source.name, error=str(error))
             continue
-        items, n_no_pub, n_old = apply_recency_filter(raw_items)
+        items, n_no_pub, n_old = apply_recency_filter(
+            raw_items, recency_hours=config.collection.recency_hours
+        )
         counts["no_pubdate"] += n_no_pub
         counts["too_old"] += n_old
-        log.info(
-            "source.fetched",
-            source=source.name,
-            total=len(raw_items),
-            kept=len(items),
-            no_pubdate=n_no_pub,
-            too_old=n_old,
-        )
+        if raw_items or n_no_pub or n_old:
+            log.info(
+                "source.fetched",
+                source=source.name,
+                total=len(raw_items),
+                kept=len(items),
+                no_pubdate=n_no_pub,
+                too_old=n_old,
+            )
         for item in items:
             counts["fetched"] += 1
             text = _normalize_text(item.title + "\n" + item.raw_text)

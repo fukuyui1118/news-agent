@@ -1,0 +1,163 @@
+# Thematic keyword buckets used to GENERATE Google News queries.
+# Each (entity in watchlists.yaml) × (bucket here) → one Google News query per fetch cycle.
+# Keywords inside a bucket are OR-joined inside Google's query syntax. Mix JP and EN freely.
+
+buckets:
+  - name: ma_corporate
+    keywords:
+      - 買収
+      - 合併
+      - 統合
+      - 経営統合
+      - 子会社化
+      - 完全子会社化
+      - TOB
+      - 株式公開買付
+      - 事業譲渡
+      - 事業売却
+      - 事業撤退
+      - merger
+      - acquisition
+      - acquires
+      - takeover
+      - spinoff
+      - divest
+      - divestment
+      - bid
+
+  - name: earnings_financials
+    keywords:
+      - 決算
+      - 通期決算
+      - 四半期決算
+      - 業績
+      - 業績予想
+      - 上方修正
+      - 下方修正
+      - 純利益
+      - 営業利益
+      - 経常利益
+      - 当期利益
+      - 保険料収入
+      - earnings
+      - profit
+      - loss
+      - results
+      - guidance
+      - revenue
+      - combined ratio
+      - underwriting profit
+      - net income
+
+  - name: capital_markets
+    keywords:
+      - IPO
+      - 新規上場
+      - 上場廃止
+      - 増資
+      - 公募増資
+      - 第三者割当
+      - 自社株買い
+      - 配当
+      - 増配
+      - 減配
+      - capital raise
+      - capital injection
+      - dividend
+      - buyback
+      - share buyback
+      - listing
+      - delist
+
+  - name: ratings
+    keywords:
+      - 格付け
+      - 格上げ
+      - 格下げ
+      - rating
+      - ratings
+      - downgrade
+      - upgrade
+      - outlook
+      - A.M. Best
+      - Moody's
+      - S&P
+      - Fitch
+      - solvency
+
+  - name: leadership
+    keywords:
+      - 社長交代
+      - 役員人事
+      - CEO交代
+      - 新社長
+      - 退任
+      - 就任
+      - CEO
+      - CFO
+      - chairman
+      - chairwoman
+      - chief executive
+      - appoints
+      - resigns
+      - steps down
+      - succeeds
+      - hires
+
+  - name: regulatory
+    keywords:
+      - 規制
+      - 行政処分
+      - 業務改善命令
+      - 業務停止命令
+      - 不祥事
+      - 不正
+      - regulator
+      - regulatory
+      - fine
+      - sanction
+      - settlement
+      - lawsuit
+      - litigation
+      - probe
+      - investigation
+      - approval
+      - license
+
+  - name: reinsurance_cat
+    keywords:
+      - 再保険
+      - 巨大災害
+      - 自然災害
+      - 大規模損害
+      - 損害保険金
+      - 引受能力
+      - reinsurance treaty
+      - retrocession
+      - sidecar
+      - cat bond
+      - catastrophe bond
+      - ILS
+      - alternative capital
+      - cession
+      - quota share
+      - large loss
+      - NatCat
+
+  - name: strategy
+    keywords:
+      - 中期経営計画
+      - 中計
+      - 戦略
+      - 事業計画
+      - 海外進出
+      - 海外展開
+      - strategy
+      - launches
+      - exits
+      - partnership
+      - joint venture
+      - stake
+      - investment
+      - restructuring
+      - reorganization
