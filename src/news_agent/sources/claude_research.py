@@ -204,7 +204,10 @@ class ClaudeResearchSource(Source):
             return []
 
         try:
-            data = json.loads(text)
+            # strict=False allows literal control chars (\n, \t, \r, \0) inside
+            # quoted strings — Claude sometimes embeds raw newlines in title/
+            # summary fields, which is technically invalid JSON but harmless.
+            data = json.loads(text, strict=False)
         except json.JSONDecodeError as e:
             log.error(
                 "claude_research.json_parse_failed",
