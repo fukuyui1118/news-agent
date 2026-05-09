@@ -8,6 +8,7 @@
 # Google News RSS dropped entirely — blocked from EC2 Sydney IP.
 
 native_rss:
+  # ---- Core English insurance trade press ----
   - name: Reinsurance News
     url: https://www.reinsurancene.ws/feed/
   - name: Artemis
@@ -18,9 +19,27 @@ native_rss:
     url: https://www.insurancejournal.com/news/national/feed/
   - name: Carrier Management
     url: https://www.carriermanagement.com/feed/
+  # ---- Insurance Business magazine (regional editions) ----
+  - name: Insurance Business America
+    url: https://www.insurancebusinessmag.com/us/rss/
+  - name: Insurance Business UK
+    url: https://www.insurancebusinessmag.com/uk/rss/
+  - name: Insurance Business Asia
+    url: https://www.insurancebusinessmag.com/asia/rss/
+  # ---- Press-release wires (noisy; relevance gate filters non-insurance) ----
+  - name: PR Newswire (insurance)
+    url: https://www.prnewswire.com/rss/financial-services-insurance-latest-news/insurance-latest-news-list.rss
+  - name: GlobeNewswire (insurance)
+    url: https://www.globenewswire.com/RssFeed/orgclass/3/feedTitle/GlobeNewswire-Insurance
+  # ---- Japanese press ----
   - name: Nikkei Asia (top stories)
     url: https://asia.nikkei.com/rss/feed/nar
     trust_freshness: true   # RDF/RSS 1.0 with no per-item pubdate; URL+content dedup catches re-runs
+  - name: 東洋経済オンライン (finance)
+    url: https://toyokeizai.net/list/feed/rss
+  - name: 朝日新聞 (経済)
+    url: https://www.asahi.com/rss/asahi/business.rdf
+    trust_freshness: true   # RDF feed; pubdate may be missing
 
 newsapi:
   endpoint: https://eventregistry.org/api/v1/article/getArticles
