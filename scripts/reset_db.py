@@ -11,7 +11,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH = Path("seen.db")
+DB_PATH = Path(__file__).resolve().parent.parent / "seen.db"
 
 
 def main() -> int:
