@@ -1,0 +1,29 @@
+[Unit]
+Description=News Agent dashboard (Streamlit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=news-agent
+Group=news-agent
+WorkingDirectory=/opt/news-agent/News_Agent
+EnvironmentFile=/opt/news-agent/News_Agent/.env
+ExecStart=/opt/news-agent/News_Agent/.venv/bin/streamlit run dashboard.py \
+    --server.port 8501 \
+    --server.address 127.0.0.1 \
+    --server.headless true \
+    --browser.gatherUsageStats false
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/news-agent/News_Agent
+
+[Install]
+WantedBy=multi-user.target

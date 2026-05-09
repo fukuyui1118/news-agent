@@ -1,0 +1,203 @@
+# P1 = Japan-HQ insurers/reinsurers and their subsidiaries.
+# P2 = Global majors.
+# Match is case-insensitive. ASCII terms use word boundaries (\b<alias>\b);
+# non-ASCII terms (Japanese, etc.) match without boundaries.
+# `exclude` terms suppress an entry entirely if any exclude term appears in the text.
+
+p1_japan:
+  - canonical: Tokio Marine
+    aliases:
+      - Tokio Marine Holdings
+      - Tokio Marine & Nichido
+      - Tokio Marine HCC
+      - Tokio Marine Kiln
+      - Philadelphia Insurance
+      - Pure Insurance
+      - Delphi Financial
+      - 東京海上
+      - 東京海上日動
+  - canonical: Sompo
+    aliases:
+      - Sompo Holdings
+      - Sompo Japan
+      - Sompo International
+      - Endurance Specialty
+      - 損保ジャパン
+      - SOMPO
+  - canonical: MS&AD
+    aliases:
+      - Mitsui Sumitomo Insurance
+      - Aioi Nissay Dowa
+      - MS Amlin
+      - Transverse Insurance
+      - 三井住友海上
+      - あいおいニッセイ同和
+  - canonical: Dai-ichi Life
+    aliases:
+      - Dai-ichi Life Holdings
+      - Protective Life
+      - TAL Dai-ichi Life
+      - 第一生命
+  - canonical: Nippon Life
+    aliases:
+      - Nippon Life Insurance
+      - Nissay
+      - MLC Limited
+      - 日本生命
+  - canonical: Meiji Yasuda Life
+    aliases:
+      - Meiji Yasuda
+      - StanCorp Financial
+      - 明治安田生命
+  - canonical: Japan Post Insurance
+    aliases:
+      - Kampo
+      - かんぽ生命
+      - Japan Post Holdings Insurance
+  - canonical: Toa Re
+    aliases:
+      - Toa Reinsurance
+      - トーア再保険
+  - canonical: SBI Insurance
+    aliases:
+      - SBI Insurance Group
+      - SBI 損保
+  - canonical: Lifenet
+    aliases:
+      - Lifenet Insurance
+      - ライフネット生命
+  - canonical: Rakuten General Insurance
+    aliases:
+      - Rakuten Insurance
+      - Rakuten Life
+      - 楽天損保
+      - 楽天生命
+  - canonical: Sumitomo Life
+    aliases:
+      - Sumitomo Life Insurance
+      - 住友生命
+      - スミセイ
+  - canonical: T&D Holdings
+    aliases:
+      - T&D
+      - T&Dホールディングス
+      - 太陽生命
+      - 大同生命
+      - T&Dフィナンシャル生命
+      - Taiyo Life
+      - Daido Life
+      - T&D Financial Life
+  - canonical: Sony Financial
+    aliases:
+      - Sony Financial Group
+      - Sony Life
+      - Sony Insurance
+      - ソニーフィナンシャル
+      - ソニー生命
+      - ソニー損保
+      - ソニー銀行
+  - canonical: AFLAC Japan
+    aliases:
+      - AFLAC
+      - Aflac
+      - Aflac Life Insurance Japan
+      - アフラック
+      - アフラック生命
+  - canonical: au Insurance
+    aliases:
+      - au Insurance Japan
+      - au損保
+      - KDDI損保
+      - auフィナンシャル
+  - canonical: Saison Automobile
+    aliases:
+      - Saison Automobile and Fire
+      - セゾン自動車火災
+  - canonical: Mitsui Direct
+    aliases:
+      - Mitsui Direct General
+      - 三井ダイレクト
+      - 三井ダイレクト損保
+  - canonical: Fukoku Mutual Life
+    aliases:
+      - Fukoku Life
+      - 富国生命
+      - フコク生命
+  - canonical: Asahi Mutual Life
+    aliases:
+      - Asahi Life
+      - 朝日生命
+
+p2_global:
+  - canonical: Allianz
+    aliases: [Allianz SE, Allianz Group, アリアンツ, アリアンツ生命]
+    exclude: [Allianz Arena, Allianz Stadium, Allianz Field]
+  - canonical: AXA
+    aliases: [AXA Group, AXA XL, アクサ, アクサ生命, アクサ損害保険]
+  - canonical: Zurich
+    aliases: [Zurich Insurance, Zurich Insurance Group, チューリッヒ保険, チューリッヒ生命]
+    exclude: [Zurich Airport, City of Zurich, FC Zurich]
+  - canonical: Generali
+    aliases: [Assicurazioni Generali, Generali Group, ジェネラリ]
+  - canonical: Aviva
+    aliases: [Aviva plc, アビバ]
+  - canonical: Prudential plc
+    aliases: [Prudential UK, Prudential Asia, プルデンシャル, プルデンシャル生命, ジブラルタ生命]
+  - canonical: Legal & General
+    aliases: ["L&G", Legal and General]
+  - canonical: AIG
+    aliases: [American International Group, AIG損保, AIGジャパン, AIG損害保険]
+  - canonical: Chubb
+    aliases: [Chubb Limited, Chubb Group, チャブ保険, チャブ損害保険]
+    exclude: [Chubb Locks, Chubb Fire]
+  - canonical: Travelers
+    aliases: [Travelers Companies, Travelers Insurance, トラベラーズ]
+  - canonical: The Hartford
+    aliases: [Hartford Financial Services, ハートフォード]
+  - canonical: Liberty Mutual
+    aliases: [Liberty Mutual Insurance, リバティミューチュアル]
+  - canonical: MetLife
+    aliases: [MetLife Inc, メットライフ, メットライフ生命]
+  - canonical: Prudential Financial
+    aliases: [Prudential US, プルデンシャル・ファイナンシャル]
+  - canonical: Manulife
+    aliases: [Manulife Financial, マニュライフ, マニュライフ生命]
+  - canonical: Munich Re
+    aliases: [Munich Reinsurance, Munchener Ruck, Münchener Rück, ミュンヘン再保険, ミュンヘン・リー]
+  - canonical: Swiss Re
+    aliases: [Swiss Reinsurance, Swiss Re Group, スイス再保険, スイス・リー]
+  - canonical: Hannover Re
+    aliases: [Hannover Rueck, Hannover Rück, ハノーバー再保険]
+  - canonical: SCOR
+    aliases: [SCOR SE, SCOR Reinsurance, スコール]
+  - canonical: RenaissanceRe
+    aliases: [Renaissance Re, RenRe]
+  - canonical: Everest Re
+    aliases: [Everest Group, Everest Reinsurance]
+  - canonical: PartnerRe
+    aliases: [Partner Re, Partner Reinsurance]
+  - canonical: Berkshire Hathaway
+    aliases: [Gen Re, General Re, National Indemnity, Berkshire Hathaway Reinsurance]
+  - canonical: Lloyd's of London
+    aliases: ["Lloyd's", "Lloyd's market", "Lloyds of London", "Lloyd's syndicate"]
+    exclude: ["Lloyd's Bank", "Lloyd's Banking", "Lloyd's Pharmacy", "Lloyd's Register", "Lloyd's TSB"]
+  - canonical: Beazley
+    aliases: [Beazley plc]
+  - canonical: Hiscox
+    aliases: [Hiscox Ltd]
+  - canonical: Lancashire
+    aliases: [Lancashire Holdings]
+  - canonical: Brit
+    aliases: [Brit Insurance]
+  - canonical: Convex
+    aliases: [Convex Group]
+  - canonical: China Re
+    aliases: [China Reinsurance]
+  - canonical: Korean Re
+    aliases: [Korean Reinsurance]
+  - canonical: Samsung Fire & Marine
+    aliases: [Samsung Fire and Marine, Samsung F&M]
+  - canonical: Ping An
+    aliases: [Ping An Insurance, Ping An Group]
+  - canonical: China Life
+    aliases: [China Life Insurance]

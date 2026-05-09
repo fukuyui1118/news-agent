@@ -1,0 +1,122 @@
+sources:
+  # ---- English RSS (existing global tier) ----
+  - name: Insurance Journal International
+    type: rss
+    url: https://www.insurancejournal.com/news/international/feed/
+    tier: 3
+    enabled: true
+  - name: Reinsurance News
+    type: rss
+    url: https://www.reinsurancene.ws/feed/
+    tier: 2
+    enabled: true
+  - name: Artemis
+    type: rss
+    url: https://www.artemis.bm/feed/
+    tier: 2
+    enabled: true
+
+  # ---- Japanese Google News searches (Phase 3b+) ----
+  # Bilingual queries (JP + EN) with shared business-focus suffix to bias toward
+  # capital-market, M&A, and strategic business news. Edit queries freely.
+  # Suffix: (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+
+  - name: Google News - 東京海上
+    type: google_news_rss
+    query: (東京海上 OR "Tokio Marine") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - 損保ジャパン
+    type: google_news_rss
+    query: (損保ジャパン OR SOMPO OR "Sompo Holdings") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - MS&AD
+    type: google_news_rss
+    query: (MS&AD OR 三井住友海上 OR あいおいニッセイ同和) (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - 第一生命
+    type: google_news_rss
+    query: (第一生命 OR "Dai-ichi Life") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - 日本生命
+    type: google_news_rss
+    query: (日本生命 OR Nissay OR "Nippon Life") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - 明治安田生命
+    type: google_news_rss
+    query: (明治安田生命 OR "Meiji Yasuda") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - 住友生命
+    type: google_news_rss
+    query: (住友生命 OR "Sumitomo Life") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - かんぽ生命
+    type: google_news_rss
+    query: (かんぽ生命 OR 日本郵政保険 OR Kampo) (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - T&D Holdings
+    type: google_news_rss
+    query: ("T&D Holdings" OR T&Dホールディングス OR 太陽生命 OR 大同生命) (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - ソニー金融
+    type: google_news_rss
+    query: (ソニー生命 OR ソニー損保 OR ソニーフィナンシャル OR "Sony Life" OR "Sony Financial") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - アフラック
+    type: google_news_rss
+    query: (アフラック OR AFLAC) (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital)
+    tier: 2
+    enabled: true
+  - name: Google News - トーア再保険
+    type: google_news_rss
+    query: (トーア再保険 OR "Toa Re" OR "Toa Reinsurance") (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画 OR earnings OR acquisition OR merger OR capital OR 引受 OR 出再 OR 受再)
+    tier: 2
+    enabled: true
+  - name: Google News - 中堅・新興損保
+    type: google_news_rss
+    query: (ライフネット生命 OR SBI損保 OR 楽天損保 OR au損保 OR 三井ダイレクト OR セゾン自動車火災) (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画)
+    tier: 2
+    enabled: true
+  - name: Google News - 海外大手JP事業
+    type: google_news_rss
+    query: (アリアンツ OR アクサ生命 OR AIG損保 OR メットライフ生命 OR プルデンシャル生命 OR ジブラルタ生命 OR マニュライフ生命 OR チューリッヒ保険) (決算 OR 業績 OR M&A OR 買収 OR 合併 OR 提携 OR IPO OR 増資 OR 配当 OR 経営 OR 規制 OR 行政処分 OR 中期経営計画)
+    tier: 2
+    enabled: true
+  - name: Google News - 保険業界全般
+    type: google_news_rss
+    query: (保険業界 OR 再保険 OR 損保 OR 生保) (M&A OR 買収 OR 合併 OR 業績 OR 規制 OR 行政処分 OR 不祥事 OR 中期経営計画 OR IPO OR 増資)
+    tier: 3
+    enabled: true
+
+  # ---- Direct Nikkei scrape (disabled; auth blocked by bot detection) ----
+  - name: Nikkei 金融・保険
+    type: browser_use
+    url: https://www.nikkei.com/business/finance/insurance/
+    tier: 2
+    enabled: false   # Re-enable only after switching to interactive-login + storage_state
+
+storage:
+  db_path: seen.db
+
+logging:
+  log_path: logs/agent.log
+  level: INFO
+
+watchlists_path: config/watchlists.yaml
+relevance_path: config/relevance.yaml
+
+scheduler:
+  fetch_interval_minutes: 60
+  p1_batch_interval_hours: 3
+  digest_cron_hour: 7
+  digest_cron_minute: 0
+  timezone: Asia/Tokyo

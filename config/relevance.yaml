@@ -1,0 +1,212 @@
+# Business/finance keywords. ASCII terms use word-boundary regex (\b<term>\b);
+# non-ASCII terms (Japanese, etc.) use case-insensitive substring match.
+# A story passes the relevance gate if any keyword matches (Tier 2/3),
+# or unconditionally if source_tier == 1.
+
+business_keywords:
+  # M&A / corporate actions
+  - merger
+  - acquisition
+  - acquires
+  - acquired
+  - acquire
+  - divest
+  - divests
+  - divestment
+  - spinoff
+  - spin off
+  - takeover
+  - bid
+  - sells
+  - sold
+  - sale
+
+  # Financials / earnings
+  - earnings
+  - profit
+  - profits
+  - loss
+  - results
+  - guidance
+  - revenue
+  - combined ratio
+  - underwriting profit
+  - underwriting loss
+  - net income
+  - operating income
+  - premium income
+  - book value
+  - reports Q1
+  - reports Q2
+  - reports Q3
+  - reports Q4
+
+  # Capital / ratings
+  - capital raise
+  - capital injection
+  - solvency
+  - dividend
+  - buyback
+  - share buyback
+  - IPO
+  - listing
+  - delist
+  - rating
+  - ratings
+  - downgrade
+  - upgrade
+  - outlook
+  - A.M. Best
+  - Moody's
+  - S&P
+  - Fitch
+
+  # Leadership
+  - CEO
+  - CEOs
+  - CFO
+  - chairman
+  - chairwoman
+  - chairperson
+  - chief executive
+  - chief financial officer
+  - appoints
+  - appointed
+  - resigns
+  - resigned
+  - steps down
+  - succeeds
+  - hires
+  - names
+  - head of
+
+  # Strategy
+  - launches
+  - launch
+  - exits
+  - enters
+  - withdrawal
+  - partnership
+  - joint venture
+  - stake
+  - investment
+  - strategy
+  - restructuring
+  - reorganization
+  - consortium
+
+  # Regulatory / legal
+  - regulator
+  - regulatory
+  - approval
+  - license
+  - sanction
+  - fine
+  - settlement
+  - lawsuit
+  - litigation
+  - probe
+  - investigation
+
+  # Reinsurance / underwriting
+  - reinsurance treaty
+  - retrocession
+  - sidecar
+  - cat bond
+  - catastrophe bond
+  - ILS
+  - alternative capital
+  - cession
+  - quota share
+  - treaty capacity
+
+  # Losses / events
+  - loss reserve
+  - reserve charge
+  - catastrophe loss
+  - cat loss
+  - NatCat
+  - large loss
+  - claims surge
+
+  # === Japanese — M&A / corporate actions ===
+  - 買収
+  - 合併
+  - 統合
+  - 経営統合
+  - 子会社化
+  - 完全子会社化
+  - TOB
+  - 株式公開買付
+  - 事業譲渡
+  - 事業売却
+  - 事業撤退
+  - 提携
+  - 業務提携
+  - 資本提携
+  - 戦略的提携
+
+  # === Japanese — capital markets ===
+  - 新規上場
+  - 上場廃止
+  - 増資
+  - 公募増資
+  - 第三者割当
+  - 自社株買い
+  - 配当
+  - 増配
+  - 減配
+  - 株式分割
+  - 機関投資家
+
+  # === Japanese — earnings / financials ===
+  - 決算
+  - 通期決算
+  - 四半期決算
+  - 業績
+  - 業績予想
+  - 上方修正
+  - 下方修正
+  - 売上高
+  - 純利益
+  - 営業利益
+  - 経常利益
+  - 当期利益
+  - 保険料収入
+  - コンバインド・レシオ
+
+  # === Japanese — strategy / leadership ===
+  - 戦略
+  - 中期経営計画
+  - 中計
+  - 事業計画
+  - 社長交代
+  - 役員人事
+  - CEO交代
+  - 新社長
+  - 退任
+  - 就任
+  - 海外進出
+  - 海外展開
+
+  # === Japanese — regulatory / risk ===
+  - 規制
+  - 行政処分
+  - 業務改善命令
+  - 業務停止命令
+  - 不祥事
+  - 不正
+  - ガバナンス
+  - コンプライアンス
+  - 情報漏洩
+  - 顧客情報
+  - 個人情報
+  - カルテル
+
+  # === Japanese — reinsurance / cat ===
+  - 再保険
+  - 巨大災害
+  - 自然災害
+  - 大規模損害
+  - 損害保険金
+  - 引受能力
