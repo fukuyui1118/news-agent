@@ -19,8 +19,10 @@ from .config import (
     load_watchlists,
 )
 from .mailer import Mailer, MailerConfig
+from .inoreader_oauth import InoreaderAuthError, InoreaderClient
 from .sources.base import RawItem, Source
 from .sources.claude_research import ClaudeResearchSource
+from .sources.inoreader import InoreaderSource, parse_tag_url
 from .sources.newsapi import NewsApiSource  # retained but no longer instantiated
 from .sources.rss import RSSSource
 from .store import Store
@@ -95,16 +97,49 @@ def build_sources(
     """
     sources: list[Source] = []
 
-    # Layer 1: native RSS
-    for nf in feeds.native_rss:
-        sources.append(
-            RSSSource(
-                name=nf.name,
-                url=nf.url,
-                tier=nf.tier,
-                trust_freshness=nf.trust_freshness,
+    # Optional: shared InoreaderClient for any Inoreader-tag URLs in feeds.yaml.
+    # Falls back to the public-RSS path (RSSSource) if credentials are missing.
+    inoreader_client: InoreaderClient | None = None
+    if secrets.inoreader_refresh_token and secrets.inoreader_app_id and secrets.inoreader_app_secret:
+        try:
+            inoreader_client = InoreaderClient(
+                app_id=secrets.inoreader_app_id,
+                app_secret=secrets.inoreader_app_secret,
+                refresh_token=secrets.inoreader_refresh_token,
+                env_path=Path(".env") if Path(".env").exists() else None,
             )
-        )
+        except InoreaderAuthError as e:
+            log.warning("inoreader.client_init_failed", error=str(e))
+            inoreader_client = None
+
+    # Layer 1: native RSS — but route Inoreader-tag URLs through the API client
+    # when credentials are available (gives us article-true publish times).
+    for nf in feeds.native_rss:
+        is_inoreader_tag = parse_tag_url(nf.url) is not None
+        if is_inoreader_tag and inoreader_client is not None:
+            sources.append(
+                InoreaderSource(
+                    name=nf.name,
+                    tag_url=nf.url,
+                    client=inoreader_client,
+                    tier=nf.tier,
+                )
+            )
+        else:
+            if is_inoreader_tag:
+                log.warning(
+                    "inoreader.fallback_to_rss",
+                    feed=nf.name,
+                    reason="INOREADER_REFRESH_TOKEN missing; using RSS public-share",
+                )
+            sources.append(
+                RSSSource(
+                    name=nf.name,
+                    url=nf.url,
+                    tier=nf.tier,
+                    trust_freshness=nf.trust_freshness,
+                )
+            )
 
     # Layer 2: Claude Opus 4.7 + web_search (curated research). Phase 8.
     # Replaces the prior NewsAPI.ai layer entirely. Cadence-gated per query

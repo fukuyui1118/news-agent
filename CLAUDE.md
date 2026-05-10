@@ -44,11 +44,13 @@ python -m news_agent --stats                      # DB/feed/api_usage summary
 10. **P3**: never emailed; rows exist for dashboard visibility + dedup.
 
 ## Architecture (one-line each)
-- `agent.py` — orchestrates `fetch_cycle()`, `run_digest_now()`, `run_fetch_and_digest_now()`. Two-pass: per-source fetch+recency, then one batched `ai_classifier.classify_items()` call across all collected items, then persistence.
+- `agent.py` — orchestrates `fetch_cycle()`, `run_digest_now()`, `run_fetch_and_digest_now()`. Two-pass: per-source fetch+recency, then one batched `ai_classifier.classify_items()` call across all collected items, then persistence. `build_sources` routes Inoreader-tag URLs through `InoreaderSource` (REST API) when credentials are available, else `RSSSource`.
 - `scheduler.py` — APScheduler `BlockingScheduler` with **one job**: `CronTrigger(hour='7,19', minute=0, timezone='Asia/Tokyo')` runs `run_once()` then `run_digest_now()` sequentially.
 - `digest.py` — runs `digest_eligible_stories(hours=12)` → calls `ai_email.compose_email()` (one Opus call) → mailer sends.
 - `ai_classifier.py` — Claude Opus batched classifier. `classify_items(items, watchlists, *, api_key)` returns `{idx: "P1"|"P2"}`; missing indices = P3. Falls back to all-P3 on parse/API failure.
 - `ai_email.py` — Claude Opus batched email composer. `compose_email(rows, summarizer)` returns ranked `DigestEntry` list capped at `max_entries=15`. Falls back to per-row Haiku summarize.
+- `inoreader_oauth.py` — Phase 9.3. `InoreaderClient` handles the OAuth refresh-token dance and `/reader/api/0/stream/contents` calls. Caches access token for 1h, auto-refreshes on 401, persists rotated refresh tokens back to `.env`.
+- `sources/inoreader.py` — Phase 9.3. `InoreaderSource` uses `InoreaderClient.fetch_tag()` and maps each API item to `RawItem`. Uses `canonical[0].href` (publisher URL) and `published` (article true publish time) — the public RSS path doesn't surface either.
 - `classifier.py` / `relevance.py` — **deprecated** (regex-based). No longer imported by the pipeline; kept for now as dead code.
 - `sources/rss.py` — feedparser-based; `trust_freshness` flag for RDF feeds without per-item pubdate.
 - `sources/claude_research.py` — Claude Opus 4.7 + `web_search`, two-stage prompt (Phase 8). Cadence-gated 12h via `api_usage` table; surfaces COVERAGE_NOTES (`searches_run`, `tier1_aggregators_hit`, `fallback_used`, `gaps`) into telemetry columns.
@@ -159,8 +161,8 @@ Filters in the sidebar: priority (P1/P2/P3/DROPPED), email status, source, title
 - Phase 9 (twice-daily 07:00/19:00 JST cron + Claude curator step + drop 3h P1 batch): done.
 - Phase 9.1 (Inoreader keyword feeds, 14 per-carrier tags via Pro public-RSS): done.
 - Phase 9.2 (replace regex classifier + relevance gate + curator with two-call Opus AI classifier + email composer): done.
+- Phase 9.3 (Inoreader REST API + OAuth replaces public-RSS path; gives article-true publish times): done — pending user OAuth setup.
 - Phase 8.4 (prompt caching on Stage-1 system block; surface tier/category/gaps in dashboard): not started.
-- Inoreader true-recency fix (article-meta fetch to get real publish date): not started.
 
 ## AWS EC2 deployment
 See `deploy/README.md` for full instructions. Bootstrap script at `deploy/setup-ec2.sh`. systemd units at `deploy/news-agent.service` and `deploy/news-dashboard.service`. Target: t4g.nano in ap-northeast-1, ~$4/mo. Browser-use deps are in the `[nikkei]` extra so the slim deploy installs only ~150MB.

@@ -157,6 +157,9 @@ class Secrets(BaseSettings):
     nikkei_pass: str = ""
     browser_use_model: str = "claude-sonnet-4-5"
     newsapi_ai_key: str = ""
+    inoreader_app_id: str = ""
+    inoreader_app_secret: str = ""
+    inoreader_refresh_token: str = ""
 
 
 def load_config(path: Path = Path("config/config.yaml")) -> Config:

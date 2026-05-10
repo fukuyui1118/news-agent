@@ -59,7 +59,8 @@ The prompt runs in two stages:
         │
         ▼
    ┌─────────────────────┐
-   │ 1. Fetch (parallel) │  RSS × 13 native + 26 Inoreader keyword feeds
+   │ 1. Fetch (parallel) │  RSS × 13 native + 14 Inoreader keyword tags
+   │                     │  (Inoreader via REST API → real publish times)
    │                     │  + Claude Research × 1 (cadence-gated 12h)
    └────────┬────────────┘
             ▼
@@ -196,10 +197,54 @@ All driven by APScheduler in [`src/news_agent/scheduler.py`](src/news_agent/sche
 | File | Purpose |
 |---|---|
 | [`config/config.yaml`](config/config.yaml) | Storage path, logging, scheduler intervals, recency filter. |
-| [`config/feeds.yaml`](config/feeds.yaml) | RSS feed list + Claude Research query config. |
-| [`config/watchlists.yaml`](config/watchlists.yaml) | P1 (Japan-HQ) and P2 (global) entities with aliases and exclusion terms. **Drives both query generation AND classification.** |
-| [`config/relevance.yaml`](config/relevance.yaml) | Business keywords for the post-fetch relevance gate. |
-| [`.env`](.env.example) | Secrets (Anthropic API key, Gmail SMTP). Never commit. |
+| [`config/feeds.yaml`](config/feeds.yaml) | RSS feed list (native + Inoreader tag URLs) + Claude Research query config. |
+| [`config/watchlists.yaml`](config/watchlists.yaml) | P1 (Japan-HQ) and P2 (global) entities. Injected into the AI classifier prompt as context. |
+| [`config/relevance.yaml`](config/relevance.yaml) | Legacy regex-based relevance keywords. Unused since Phase 9.2 — kept for reference. |
+| [`.env`](.env.example) | Secrets (Anthropic API key, Gmail SMTP, Inoreader API). Never commit. |
+
+---
+
+## Inoreader API setup (one-time, ~10 min)
+
+The 14 Inoreader keyword tags in `feeds.yaml` are fetched via Inoreader's REST API, not the public-RSS export. The API exposes the article's **true publish time** (the public RSS only shows Inoreader's ingestion timestamp), so the 24h recency filter actually works. If credentials are missing, the agent transparently falls back to the public-RSS path.
+
+### Setup steps
+
+1. **Register an app** at <https://www.inoreader.com/developers/>. Click "Create application", fill in:
+   - **Name**: `News Agent` (or whatever)
+   - **Description**: Personal automation
+   - **Redirect URI**: `urn:ietf:wg:oauth:2.0:oob` (out-of-band — no callback server needed)
+   - **Scopes**: `read`
+2. Copy the resulting **App ID** and **App Secret** into your `.env`:
+
+   ```env
+   INOREADER_APP_ID=your-app-id
+   INOREADER_APP_SECRET=your-app-secret
+   ```
+
+3. **Run the bootstrap script** to obtain a long-lived refresh token:
+
+   ```bash
+   .venv/bin/python scripts/inoreader_oauth_bootstrap.py
+   ```
+
+   It prints an authorization URL. Visit it in your browser, log in, click "Allow". Inoreader displays a short authorization code; paste that back into the script. The script exchanges it for tokens and prints:
+
+   ```
+   INOREADER_REFRESH_TOKEN=<long opaque string>
+   ```
+
+4. **Copy that line into your `.env`** (both laptop and EC2). Refresh tokens are long-lived (~1 year). The agent auto-refreshes the short-lived access token internally.
+
+### How it works
+
+- `agent.py::build_sources` detects URLs of form `https://www.inoreader.com/stream/user/<id>/tag/<name>` and routes them to `InoreaderSource` instead of `RSSSource`.
+- `InoreaderSource` calls the API, maps each item's `published` field (unix seconds) to `RawItem.published_at`, and prefers `canonical[0].href` (publisher URL) over `alternate[0].href` (Google News wrapper).
+- The shared `InoreaderClient` in `inoreader_oauth.py` caches the access token for 1 hour and refreshes on 401. Rotated refresh tokens are persisted back to `.env` automatically.
+
+### Disabling
+
+Just remove `INOREADER_REFRESH_TOKEN` from `.env`. The agent will log `inoreader.fallback_to_rss` for each tag and use the public-RSS export instead (with the recency-leakage caveat).
 
 ---
 
