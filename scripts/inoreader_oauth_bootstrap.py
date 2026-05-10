@@ -50,22 +50,22 @@ CALLBACK_PORT = 8765
 CALLBACK_PATH = "/callback"
 REDIRECT_URI = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
 
-SUCCESS_HTML = b"""<!DOCTYPE html>
+SUCCESS_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Inoreader OAuth complete</title></head>
 <body style="font-family: -apple-system, sans-serif; padding: 4em; max-width: 40em">
 <h2>✅ Authorization captured</h2>
 <p>You can close this tab. Return to the terminal to see your refresh token.</p>
 </body></html>
-"""
+""".encode("utf-8")
 
-ERROR_HTML_TEMPLATE = b"""<!DOCTYPE html>
+ERROR_HTML_TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>OAuth error</title></head>
 <body style="font-family: -apple-system, sans-serif; padding: 4em; max-width: 40em">
 <h2>❌ OAuth error</h2>
 <pre>{detail}</pre>
 <p>Return to the terminal for diagnostics.</p>
 </body></html>
-"""
+""".encode("utf-8")
 
 
 class _State:
