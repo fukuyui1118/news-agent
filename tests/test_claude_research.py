@@ -159,6 +159,127 @@ def test_dumps_response_to_disk(store, tmp_path, monkeypatch):
     assert "dump-q" in payload  # query_name appears in envelope
 
 
+SAMPLE_XML = """<news_digest as_of="2026-05-10 14:30">
+  <bucket name="A_japanese_insurers">
+    <item>
+      <headline_ja>東京海上、Q1決算を発表</headline_ja>
+      <original_headline lang="ja">東京海上、Q1決算を発表</original_headline>
+      <company>東京海上HD</company>
+      <published_jst>2026-05-10 09:00 JST</published_jst>
+      <source>日本経済新聞</source>
+      <url>https://www.nikkei.com/x</url>
+      <one_line_context_ja>純利益が前年同期比で増加。</one_line_context_ja>
+      <other_sources>Reuters, Bloomberg</other_sources>
+    </item>
+  </bucket>
+  <bucket name="B_japan_regulation">
+    <item>該当なし</item>
+  </bucket>
+  <bucket name="C_global_sector">
+    <item>
+      <headline_ja>Munich Re、Q1利益が増加</headline_ja>
+      <original_headline lang="en">Munich Re Q1 profit rises</original_headline>
+      <company>Munich Re</company>
+      <published_jst>2026-05-10 12:00 JST</published_jst>
+      <source>Reuters</source>
+      <url>https://reuters.com/y</url>
+      <one_line_context_ja>P&amp;C combined ratio improved.</one_line_context_ja>
+      <other_sources></other_sources>
+    </item>
+  </bucket>
+  <bucket name="D_rating_actions">
+    <item>該当なし</item>
+  </bucket>
+  <coverage_notes>
+    <searches_run>11</searches_run>
+    <gaps>特になし</gaps>
+  </coverage_notes>
+</news_digest>"""
+
+
+def test_bucket_xml_parses_minimal_response(store, tmp_path, monkeypatch):
+    from news_agent.sources import claude_research as cr_mod
+
+    monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
+
+    src = ClaudeResearchSource(
+        name="bx-q",
+        api_key="dummy",
+        cadence_hours=12,
+        store=store,
+        prompt_strategy="bucket_xml",
+    )
+    fake_text = MagicMock(type="text")
+    fake_text.text = SAMPLE_XML
+    fake_resp = MagicMock(content=[fake_text])
+    fake_resp.model_dump.return_value = {"id": "msg_xml"}
+
+    with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = fake_resp
+        mock_anth.return_value = mock_client
+        items = src.fetch()
+
+    assert len(items) == 2  # one A item, one C item; sentinels skipped
+    titles = [it.title for it in items]
+    assert "東京海上、Q1決算を発表" in titles
+    assert "Munich Re、Q1利益が増加" in titles
+    # raw_text carries bucket label
+    assert any(it.raw_text.startswith("[A]") for it in items)
+    assert any(it.raw_text.startswith("[C]") for it in items)
+    # source from <source> field, not query name
+    assert any(it.source == "日本経済新聞" for it in items)
+    assert any(it.source == "Reuters" for it in items)
+    # published_at parsed and in UTC
+    for it in items:
+        assert it.published_at is not None
+        assert it.published_at.tzinfo is not None
+
+
+def test_bucket_xml_uses_system_param_and_max_tokens(store):
+    src = ClaudeResearchSource(
+        name="bx-q",
+        api_key="dummy",
+        cadence_hours=12,
+        store=store,
+        prompt_strategy="bucket_xml",
+    )
+    fake_text = MagicMock(type="text")
+    fake_text.text = SAMPLE_XML
+
+    with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = MagicMock(content=[fake_text])
+        mock_anth.return_value = mock_client
+        src.fetch()
+
+        kwargs = mock_client.messages.create.call_args.kwargs
+        assert kwargs["max_tokens"] == 12000
+        assert "system" in kwargs
+        assert "specialist news analyst" in kwargs["system"]
+        # JST datetime injected
+        assert "JST" in kwargs["system"]
+
+
+def test_bucket_xml_handles_malformed_xml(store):
+    src = ClaudeResearchSource(
+        name="bx-q",
+        api_key="dummy",
+        cadence_hours=12,
+        store=store,
+        prompt_strategy="bucket_xml",
+    )
+    fake_text = MagicMock(type="text")
+    fake_text.text = "this is not xml at all"
+
+    with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = MagicMock(content=[fake_text])
+        mock_anth.return_value = mock_client
+        items = src.fetch()
+    assert items == []
+
+
 def test_two_stage_makes_two_calls(store, tmp_path, monkeypatch):
     from news_agent.sources import claude_research as cr_mod
 

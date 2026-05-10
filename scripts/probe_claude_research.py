@@ -1,12 +1,13 @@
-"""Fire two Claude Research calls (current vs minimal prompt) and compare.
+"""Compare Claude Research prompt strategies side-by-side.
 
-Bypasses cadence by passing store=None. Both calls dump full responses to
-logs/claude_research/. Prints a side-by-side comparison to stdout.
+Fires two real Anthropic calls (cadence bypassed via store=None) and prints
+a comparison: parsed item counts, fresh-rate (<=24h), bucket distribution,
+URL overlap. Both responses are persisted under logs/claude_research/.
 
 Usage:
     .venv/bin/python scripts/probe_claude_research.py
 
-Cost: roughly $0.60-$2.00 total (two Opus 4.7 + web_search calls).
+Cost: roughly $0.80-$2.50 total (two Opus 4.7 + web_search + Haiku).
 """
 from __future__ import annotations
 
@@ -24,30 +25,8 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(ROOT / ".env")
 
 from news_agent.sources.claude_research import (  # noqa: E402
-    PROMPT_TEMPLATE,
     ClaudeResearchSource,
 )
-
-MINIMAL_PROMPT = """\
-Use web_search to find insurance-sector news headlines from the last 24 hours.
-Cover Japan-focused stories AND global capital-markets, M&A, regulation, and ratings news.
-Search broadly with multiple distinct queries.
-
-Return JSON only — no prose, no markdown fences:
-{{
-  "headlines": [
-    {{
-      "title": "...",
-      "url": "https://...",
-      "source": "...",
-      "published_at": "ISO 8601 with timezone",
-      "summary_ja": "1-2 sentence Japanese summary"
-    }}
-  ]
-}}
-
-Up to {max_headlines} headlines. Skip duplicates of the same event.
-"""
 
 
 def _summarise(label: str, items, response_path_hint: str = ""):
@@ -62,6 +41,7 @@ def _summarise(label: str, items, response_path_hint: str = ""):
     now = datetime.now(timezone.utc)
     fresh = 0
     rows = []
+    bucket_counts: dict[str, int] = {}
     for it in items:
         if it.published_at is not None:
             age_h = (now - it.published_at).total_seconds() / 3600
@@ -70,12 +50,20 @@ def _summarise(label: str, items, response_path_hint: str = ""):
             age_str = f"{age_h:6.1f}h"
         else:
             age_str = "  ?  "
-        rows.append((age_str, it.title, it.url))
+        rows.append((age_str, it.title, it.url, it.source))
+        # Bucket label is encoded in raw_text as "[A] ..." for bucket-XML
+        if it.raw_text and it.raw_text.startswith("["):
+            letter = it.raw_text[1:2]
+            bucket_counts[letter] = bucket_counts.get(letter, 0) + 1
 
     print(f"fresh (<=24h): {fresh}/{len(items)}")
-    print("first 10 (age, title):")
-    for age, title, url in rows[:10]:
-        print(f"  {age}  {title[:100]}")
+    if bucket_counts:
+        print("bucket distribution: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(bucket_counts.items())
+        ))
+    print("first 12 (age, source, title):")
+    for age, title, url, source in rows[:12]:
+        print(f"  {age}  [{source[:18]:18}]  {title[:80]}")
         print(f"           {url}")
 
 
@@ -93,45 +81,47 @@ def main() -> int:
         print("ANTHROPIC_API_KEY missing in env", file=sys.stderr)
         return 2
 
-    print("Probing Claude Research (current prompt + minimal prompt)...")
-    print("Cost estimate: ~$0.60-$2.00. Two calls, sequential.\n")
+    print("Probing Claude Research strategies (two_stage vs bucket_xml)...")
+    print("Cost estimate: ~$0.80-$2.50. Sequential calls.\n")
 
-    current = ClaudeResearchSource(
-        name="probe_current",
+    two_stage = ClaudeResearchSource(
+        name="probe_two_stage",
         api_key=api_key,
         store=None,                  # bypass cadence
         max_headlines=30,
         max_search_uses=12,
+        prompt_strategy="two_stage",
     )
-    items_current = current.fetch()
+    items_two_stage = two_stage.fetch()
 
-    minimal = ClaudeResearchSource(
-        name="probe_minimal",
+    bucket_xml = ClaudeResearchSource(
+        name="probe_bucket_xml",
         api_key=api_key,
         store=None,
         max_headlines=30,
         max_search_uses=12,
-        prompt_override=MINIMAL_PROMPT,
+        prompt_strategy="bucket_xml",
     )
-    items_minimal = minimal.fetch()
+    items_bucket = bucket_xml.fetch()
 
-    _summarise("CURRENT PROMPT", items_current, _latest_dump("probe_current__"))
-    _summarise("MINIMAL PROMPT", items_minimal, _latest_dump("probe_minimal__"))
+    _summarise("TWO_STAGE (current default)", items_two_stage, _latest_dump("probe_two_stage__"))
+    _summarise("BUCKET_XML (new strategy)", items_bucket, _latest_dump("probe_bucket_xml__"))
 
-    urls_current = {it.url for it in items_current}
-    urls_minimal = {it.url for it in items_minimal}
-    overlap = urls_current & urls_minimal
+    urls_a = {it.url for it in items_two_stage}
+    urls_b = {it.url for it in items_bucket}
+    overlap = urls_a & urls_b
     print("\n=========== DIFF ===========")
-    print(f"current = {len(urls_current)}, minimal = {len(urls_minimal)}, overlap = {len(overlap)}")
-    only_minimal = urls_minimal - urls_current
-    if only_minimal:
-        print(f"\nURLs only in MINIMAL ({len(only_minimal)}):")
-        for u in list(only_minimal)[:10]:
+    print(f"two_stage = {len(urls_a)}, bucket_xml = {len(urls_b)}, overlap = {len(overlap)}")
+
+    only_b = urls_b - urls_a
+    if only_b:
+        print(f"\nURLs only in BUCKET_XML ({len(only_b)}):")
+        for u in list(only_b)[:10]:
             print(f"  {u}")
-    only_current = urls_current - urls_minimal
-    if only_current:
-        print(f"\nURLs only in CURRENT ({len(only_current)}):")
-        for u in list(only_current)[:10]:
+    only_a = urls_a - urls_b
+    if only_a:
+        print(f"\nURLs only in TWO_STAGE ({len(only_a)}):")
+        for u in list(only_a)[:10]:
             print(f"  {u}")
 
     return 0

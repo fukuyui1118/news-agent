@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 import re
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import structlog
 from anthropic import Anthropic
@@ -131,6 +133,99 @@ STRUCTURING_PROMPT_TEMPLATE = """\
 ---"""
 
 
+# Phase 8.2: bucket-XML strategy (probe-only). System+user split, JST datetime
+# injected, four buckets (JP issuers / JP regulation / global / rating actions),
+# bilingual search enumerated per issuer, XML output. See plan section 20.
+SYSTEM_PROMPT_BUCKET_XML = """\
+You are a specialist news analyst covering the Japanese and global insurance sector for an institutional financial-markets desk in Tokyo. Your job is to retrieve, verify, deduplicate, translate, and categorize insurance-sector headlines from the last 24 hours, and to output them in Japanese.
+
+# Hard constraints
+1. ONLY include headlines whose publication timestamp is strictly within the 24-hour window ending at {now_jst} JST. If you cannot verify a publish datetime, exclude the item — do NOT estimate or infer.
+2. Output language: Japanese (日本語) only. English-source headlines must be faithfully translated; preserve proper nouns (company names, product names, ratings symbols like "A+", "Aa3") in their original form.
+3. Use the web_search tool aggressively. Run multiple queries in BOTH Japanese and English. Do not stop after one search — scale to 8–15 searches as needed for full coverage of the buckets below.
+4. Deduplicate: if the same story appears across multiple outlets, keep one entry and list the others under <other_sources>.
+5. Never fabricate. If a bucket has zero qualifying items, output <item>該当なし</item> for that bucket.
+6. Do not summarize beyond a headline + one-line context. This is a headline scan, not a research note.
+
+# Coverage scope
+
+## Bucket A — Major 20 Japanese insurers (company-specific news)
+Search each of the following by name in BOTH languages:
+- 東京海上ホールディングス / Tokio Marine Holdings (incl. 東京海上日動)
+- MS&ADインシュアランスグループHD / MS&AD (incl. 三井住友海上, あいおいニッセイ同和損保)
+- SOMPOホールディングス / Sompo Holdings (incl. 損害保険ジャパン, Sompo International)
+- 日本生命 / Nippon Life
+- 第一生命ホールディングス / Dai-ichi Life Holdings
+- 明治安田生命 / Meiji Yasuda Life
+- 住友生命 / Sumitomo Life
+- かんぽ生命 / Japan Post Insurance
+- T&Dホールディングス / T&D Holdings (incl. 大同生命, 太陽生命)
+- ソニーフィナンシャルグループ / Sony Financial (Sony Life)
+- プルデンシャル生命 / Prudential of Japan
+- アフラック生命 / Aflac Life Japan
+- メットライフ生命 / MetLife Japan
+- アクサ生命 / AXA Life Japan
+- マニュライフ生命 / Manulife Japan
+- ジブラルタ生命 / Gibraltar Life
+- 富国生命 / Fukoku Mutual Life
+- 朝日生命 / Asahi Mutual Life
+- ライフネット生命 / Lifenet Insurance
+- オリックス生命 / ORIX Life Insurance
+
+Relevant news types: earnings, capital actions (debt/equity issuance, buybacks, hybrids), M&A, reinsurance deals, strategic shareholding sales, governance/misconduct, leadership changes, product launches, ratings actions.
+
+## Bucket B — Japanese regulation and industry-body news
+Sources to prioritize: 金融庁 (FSA), 生命保険協会 (LIAJ), 日本損害保険協会 (GIAJ), 日本銀行, 財務省, Nikkei, Bloomberg Japan, Reuters Japan, 保険毎日新聞, インシュアランス, R&I, JCR.
+Topics: 経済価値ベースのソルベンシー規制 (ICS/ESR), 保険業法改正, IFRS17, cross-shareholding unwinds, FSA monitoring/inspection actions, tax/disclosure rule changes.
+
+## Bucket C — Global insurance sector news (translated to Japanese)
+Sources: Reinsurance News, Artemis.bm, Insurance Insider, Insurance Journal, S&P Global, Bloomberg, Reuters, FT, Financial News, AM Best, Fitch, Moody's, S&P Global Ratings press.
+Topics: global M&A, capital-markets activity (cat bonds, sidecars, hybrid issuance, IPOs, sub debt), reinsurance pricing/renewals, rating actions on global insurers/reinsurers, large-loss events, regulatory changes (NAIC, PRA, EIOPA, IAIS, BMA).
+
+## Bucket D — Rating actions (dedicated)
+Any rating change, outlook revision, or watch placement on insurers/reinsurers globally — Japanese or non-Japanese — by AM Best, S&P, Moody's, Fitch, R&I, JCR. Surface every action separately even if also covered in A/B/C.
+
+# Search strategy
+- For each Japanese issuer, run at least one Japanese-language query (e.g. "東京海上 ニュース") and one English-language query (e.g. "Tokio Marine news").
+- For ratings, query each agency's recent action page in addition to general searches.
+- For regulation, query FSA and trade-body sites directly.
+- Always check the source's timestamp before including. Reject if older than 24h or if timestamp is missing/ambiguous.
+
+# Output format
+Return ONLY the XML block below. No preamble, no postamble.
+
+<news_digest as_of="{now_jst}">
+  <bucket name="A_japanese_insurers">
+    <item>
+      <headline_ja>...</headline_ja>
+      <original_headline lang="ja|en">...</original_headline>
+      <company>...</company>
+      <published_jst>YYYY-MM-DD HH:MM JST</published_jst>
+      <source>...</source>
+      <url>...</url>
+      <one_line_context_ja>...</one_line_context_ja>
+      <other_sources>...</other_sources>
+    </item>
+    <!-- repeat -->
+  </bucket>
+  <bucket name="B_japan_regulation">...</bucket>
+  <bucket name="C_global_sector">...</bucket>
+  <bucket name="D_rating_actions">...</bucket>
+  <coverage_notes>
+    <searches_run>N</searches_run>
+    <gaps>記載すべきギャップがあればここに。なければ「特になし」。</gaps>
+  </coverage_notes>
+</news_digest>
+"""
+
+
+USER_PROMPT_BUCKET_XML = """\
+基準日時(JST): {now_jst}
+
+過去24時間以内に公開された保険セクターのヘッドライン一覧を、上記システムプロンプトの仕様に従って収集・出力してください。日本語ソースと英語ソースの両方を網羅し、英語ソースは日本語訳を付けてください。各記事の公開時刻が24時間以内であることを必ず検証してください。
+"""
+
+
 def _strip_json_fences(text: str) -> str:
     """Pull a JSON object out of a Claude response.
 
@@ -167,6 +262,7 @@ class ClaudeResearchSource(Source):
         prompt_override: str | None = None,
         two_stage: bool = True,
         structuring_model: str = "claude-haiku-4-5",
+        prompt_strategy: str = "two_stage",  # "single" | "two_stage" | "bucket_xml"
     ) -> None:
         self.name = name
         self.tier = tier
@@ -179,6 +275,7 @@ class ClaudeResearchSource(Source):
         self.prompt_override = prompt_override
         self.two_stage = two_stage
         self.structuring_model = structuring_model
+        self.prompt_strategy = prompt_strategy
 
     # ---- cadence ----------------------------------------------------------
 
@@ -219,7 +316,9 @@ class ClaudeResearchSource(Source):
         error: str | None = None
 
         try:
-            if self.two_stage and self.prompt_override is None:
+            if self.prompt_strategy == "bucket_xml" and self.prompt_override is None:
+                items = self._fetch_bucket_xml(client)
+            elif self.two_stage and self.prompt_override is None:
                 items = self._fetch_two_stage(client)
             else:
                 template = self.prompt_override or PROMPT_TEMPLATE
@@ -312,6 +411,139 @@ class ClaudeResearchSource(Source):
             discovery_chars=len(discovery_text),
         )
         return self._parse_response(structuring_resp)
+
+    # ---- bucket-XML strategy --------------------------------------------
+
+    def _fetch_bucket_xml(self, client: Anthropic) -> list[RawItem]:
+        """System+user split, JST datetime injected, XML output, 4 buckets."""
+        now_jst = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M")
+        system = SYSTEM_PROMPT_BUCKET_XML.format(now_jst=now_jst)
+        user_msg = USER_PROMPT_BUCKET_XML.format(now_jst=now_jst)
+
+        t0 = time.monotonic()
+        resp = client.messages.create(
+            model=self.model,
+            max_tokens=12000,
+            system=system,
+            tools=[{**WEB_SEARCH_TOOL, "max_uses": self.max_search_uses}],
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        elapsed = int((time.monotonic() - t0) * 1000)
+        self._dump_response(resp, elapsed_ms=elapsed, suffix="bucket_xml")
+
+        items, bucket_counts, coverage = self._parse_xml_response(resp)
+        log.info(
+            "claude_research.bucket_xml.done",
+            name=self.name,
+            elapsed_ms=elapsed,
+            now_jst=now_jst,
+            bucket_a=bucket_counts.get("A", 0),
+            bucket_b=bucket_counts.get("B", 0),
+            bucket_c=bucket_counts.get("C", 0),
+            bucket_d=bucket_counts.get("D", 0),
+            searches_run=coverage.get("searches_run"),
+            gaps=coverage.get("gaps"),
+        )
+        return items
+
+    def _parse_xml_response(self, resp) -> tuple[list[RawItem], dict, dict]:
+        """Extract <item> rows from <news_digest>. Returns (items, counts, coverage_notes).
+
+        Tolerant — single malformed <item> is skipped, not fatal. Root-level
+        XML failure logs and returns empty lists.
+        """
+        text_parts: list[str] = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                t = block.text or ""
+                if t:
+                    text_parts.append(t)
+        text = "".join(text_parts).strip()
+
+        # Strip markdown fences if present
+        m = re.match(r"^```(?:xml)?\s*\n?(.*?)\n?```\s*$", text, re.DOTALL)
+        if m:
+            text = m.group(1).strip()
+
+        # Locate <news_digest> ... </news_digest>
+        start = text.find("<news_digest")
+        end = text.rfind("</news_digest>")
+        if start < 0 or end < 0:
+            log.warning("claude_research.xml_parse_failed", name=self.name, reason="no_root", preview=text[:300])
+            return [], {}, {}
+        xml_blob = text[start : end + len("</news_digest>")]
+
+        # Claude routinely writes unescaped `&` in text (e.g. "MS&AD", "P&C")
+        # which trips ElementTree. Escape any `&` that isn't already part of
+        # a named or numeric XML entity reference.
+        xml_blob = re.sub(r"&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)", "&amp;", xml_blob)
+
+        try:
+            root = ET.fromstring(xml_blob)
+        except ET.ParseError as e:
+            log.error(
+                "claude_research.xml_parse_failed",
+                name=self.name,
+                error=str(e),
+                preview=xml_blob[:300],
+            )
+            return [], {}, {}
+
+        items: list[RawItem] = []
+        bucket_counts: dict[str, int] = {}
+        for bucket in root.findall("bucket"):
+            bucket_name = bucket.get("name", "")
+            bucket_letter = bucket_name[:1] if bucket_name else "?"
+            for item_el in bucket.findall("item"):
+                # Skip the empty-bucket sentinel
+                raw = (item_el.text or "").strip()
+                if raw == "該当なし" and len(item_el) == 0:
+                    continue
+                try:
+                    item = self._xml_item_to_rawitem(item_el, bucket_letter)
+                except Exception as ex:
+                    log.warning(
+                        "claude_research.xml_item_skipped",
+                        name=self.name,
+                        error=f"{type(ex).__name__}: {ex}",
+                    )
+                    continue
+                if item is None:
+                    continue
+                items.append(item)
+                bucket_counts[bucket_letter] = bucket_counts.get(bucket_letter, 0) + 1
+
+        coverage = {}
+        cov_el = root.find("coverage_notes")
+        if cov_el is not None:
+            sr = cov_el.find("searches_run")
+            gp = cov_el.find("gaps")
+            coverage["searches_run"] = (sr.text or "").strip() if sr is not None else None
+            coverage["gaps"] = (gp.text or "").strip() if gp is not None else None
+
+        return items, bucket_counts, coverage
+
+    def _xml_item_to_rawitem(self, item_el, bucket_letter: str) -> RawItem | None:
+        def _t(tag: str) -> str:
+            el = item_el.find(tag)
+            return (el.text or "").strip() if el is not None and el.text else ""
+
+        url = _t("url")
+        title = _t("headline_ja") or _t("original_headline")
+        if not url or not title:
+            return None
+        published_at = _parse_jst_published(_t("published_jst"))
+        source = _t("source") or self.name
+        context = _t("one_line_context_ja")
+        raw_text = f"[{bucket_letter}] {context}".strip() if context else f"[{bucket_letter}]"
+        return RawItem(
+            url=url,
+            title=title,
+            published_at=published_at,
+            source=source,
+            raw_text=raw_text,
+            source_tier=self.tier,
+        )
 
     # ---- response persistence -------------------------------------------
 
@@ -431,3 +663,37 @@ def _parse_iso(value: str | None):
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+
+
+_JST_DATETIME_RE = re.compile(
+    r"(?P<y>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})"
+    r"(?:[T\s]+(?P<hh>\d{1,2}):(?P<mm>\d{2}))?"
+)
+
+
+def _parse_jst_published(value: str | None):
+    """Parse the bucket-XML <published_jst> field as JST → UTC datetime.
+
+    Handles all observed Claude variants:
+      "2026-05-10 14:30 JST"
+      "2026-05-10 14:30:00+09:00"
+      "2026-05-09 (JST、約1日前)"        — annotated date, no time
+      "2026-05-09T14:30 JST"
+    """
+    if not value:
+        return None
+    m = _JST_DATETIME_RE.search(value)
+    if not m:
+        return None
+    try:
+        dt = datetime(
+            year=int(m.group("y")),
+            month=int(m.group("m")),
+            day=int(m.group("d")),
+            hour=int(m.group("hh") or 0),
+            minute=int(m.group("mm") or 0),
+            tzinfo=ZoneInfo("Asia/Tokyo"),
+        )
+    except (TypeError, ValueError):
+        return None
+    return dt.astimezone(timezone.utc)
