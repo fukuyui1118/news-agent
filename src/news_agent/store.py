@@ -81,7 +81,10 @@ CREATE TABLE IF NOT EXISTS api_usage (
     article_count INTEGER,
     elapsed_ms  INTEGER,
     http_status INTEGER,
-    error       TEXT
+    error       TEXT,
+    searches_run          INTEGER,
+    tier1_aggregators_hit INTEGER,
+    fallback_used         INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_api_usage_called_at ON api_usage(called_at);
 CREATE INDEX IF NOT EXISTS idx_api_usage_provider_endpoint
@@ -145,6 +148,14 @@ class Store:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_seen_content_hash ON seen(content_hash)"
             )
+        # Phase 8.3: claude_research COVERAGE_NOTES telemetry.
+        api_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(api_usage)").fetchall()}
+        if "searches_run" not in api_cols:
+            self.conn.execute("ALTER TABLE api_usage ADD COLUMN searches_run INTEGER")
+        if "tier1_aggregators_hit" not in api_cols:
+            self.conn.execute("ALTER TABLE api_usage ADD COLUMN tier1_aggregators_hit INTEGER")
+        if "fallback_used" not in api_cols:
+            self.conn.execute("ALTER TABLE api_usage ADD COLUMN fallback_used INTEGER")
 
     def insert_if_new(
         self,
@@ -294,13 +305,17 @@ class Store:
         elapsed_ms: int | None = None,
         http_status: int | None = None,
         error: str | None = None,
+        searches_run: int | None = None,
+        tier1_aggregators_hit: int | None = None,
+        fallback_used: bool | None = None,
     ) -> None:
         self.conn.execute(
             """
             INSERT INTO api_usage
                 (called_at, provider, endpoint, query_name, article_count,
-                 elapsed_ms, http_status, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 elapsed_ms, http_status, error,
+                 searches_run, tier1_aggregators_hit, fallback_used)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now(timezone.utc).isoformat(),
@@ -311,6 +326,9 @@ class Store:
                 elapsed_ms,
                 http_status,
                 error,
+                searches_run,
+                tier1_aggregators_hit,
+                int(fallback_used) if fallback_used is not None else None,
             ),
         )
         self.conn.commit()

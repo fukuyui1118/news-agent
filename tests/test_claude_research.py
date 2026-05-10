@@ -3,8 +3,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from news_agent.config import WatchlistEntry, Watchlists
 from news_agent.sources.claude_research import (
     ClaudeResearchSource,
+    _parse_coverage_notes,
     _parse_iso,
     _strip_json_fences,
 )
@@ -16,6 +18,20 @@ def store(tmp_path):
     s = Store(tmp_path / "test.db")
     yield s
     s.close()
+
+
+@pytest.fixture
+def watchlists():
+    return Watchlists(
+        p1_japan=[
+            WatchlistEntry(canonical="Tokio Marine"),
+            WatchlistEntry(canonical="MS&AD"),
+        ],
+        p2_global=[
+            WatchlistEntry(canonical="Munich Re"),
+            WatchlistEntry(canonical="Allianz"),
+        ],
+    )
 
 
 # ---- helpers --------------------------------------------------------------
@@ -40,6 +56,37 @@ def test_parse_iso_zulu():
 
 def test_parse_iso_none():
     assert _parse_iso(None) is None
+
+
+def test_parse_coverage_notes_full_block():
+    text = (
+        "- some headline\n\n"
+        "COVERAGE_NOTES:\n"
+        "  searches_run: 11\n"
+        "  tier1_aggregators_hit: TDnet, FSA, AM Best\n"
+        "  fallback_used: false\n"
+        "  gaps: 特になし\n"
+    )
+    cov = _parse_coverage_notes(text)
+    assert cov["searches_run"] == 11
+    assert cov["tier1_aggregators_hit"] == 3
+    assert cov["fallback_used"] is False
+    assert cov["gaps"] == "特になし"
+    assert "searches_run: 11" in cov["raw"]
+
+
+def test_parse_coverage_notes_fallback_true():
+    text = "COVERAGE_NOTES:\nfallback_used: true\nsearches_run: 4\n"
+    cov = _parse_coverage_notes(text)
+    assert cov["fallback_used"] is True
+    assert cov["searches_run"] == 4
+
+
+def test_parse_coverage_notes_missing_block():
+    cov = _parse_coverage_notes("just bullets, no notes")
+    assert cov["searches_run"] is None
+    assert cov["fallback_used"] is None
+    assert cov["raw"] == ""
 
 
 # ---- skip paths -----------------------------------------------------------
@@ -68,7 +115,21 @@ def test_skips_within_cadence(store):
     assert items == []
 
 
-def test_runs_when_outside_cadence(store):
+def _two_stage_responses(structuring_text: str, discovery_text: str = "- bullet"):
+    """Build (discovery_resp, structuring_resp) MagicMock pair."""
+    d = MagicMock(content=[MagicMock(type="text", text=discovery_text)])
+    d.model_dump.return_value = {"id": "stage1"}
+    d.content[0].text = discovery_text
+    s = MagicMock(content=[MagicMock(type="text", text=structuring_text)])
+    s.model_dump.return_value = {"id": "stage2"}
+    s.content[0].text = structuring_text
+    return d, s
+
+
+def test_runs_when_outside_cadence(store, tmp_path, monkeypatch):
+    from news_agent.sources import claude_research as cr_mod
+
+    monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
     # Pre-populate api_usage with a successful call 13h ago.
     store.conn.execute(
         """
@@ -80,16 +141,15 @@ def test_runs_when_outside_cadence(store):
     store.conn.commit()
     src = ClaudeResearchSource(name="q", api_key="dummy", cadence_hours=12, store=store)
 
-    fake_text_block = MagicMock(type="text")
-    fake_text_block.text = (
+    structuring_payload = (
         '{"headlines":[{"title":"t","url":"https://x","source":"s",'
         '"published_at":"2026-05-10T00:00:00Z","summary_ja":"要約"}]}'
     )
-    fake_resp = MagicMock(content=[fake_text_block])
+    discovery, structuring = _two_stage_responses(structuring_payload)
 
     with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
         mock_client = MagicMock()
-        mock_client.messages.create.return_value = fake_resp
+        mock_client.messages.create.side_effect = [discovery, structuring]
         mock_anth.return_value = mock_client
         items = src.fetch()
     assert len(items) == 1
@@ -119,13 +179,15 @@ def test_handles_anthropic_error(store):
     assert "RuntimeError" in error
 
 
-def test_handles_invalid_json(store):
+def test_handles_invalid_json(store, tmp_path, monkeypatch):
+    from news_agent.sources import claude_research as cr_mod
+
+    monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
     src = ClaudeResearchSource(name="q", api_key="dummy", cadence_hours=12, store=store)
-    bad_text = MagicMock(type="text")
-    bad_text.text = "not json"
+    discovery, structuring = _two_stage_responses("not json")
     with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
         mock_client = MagicMock()
-        mock_client.messages.create.return_value = MagicMock(content=[bad_text])
+        mock_client.messages.create.side_effect = [discovery, structuring]
         mock_anth.return_value = mock_client
         items = src.fetch()
     assert items == []
@@ -137,147 +199,26 @@ def test_dumps_response_to_disk(store, tmp_path, monkeypatch):
 
     monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
 
-    # Force single-call path so we get exactly one dump per fetch.
     src = ClaudeResearchSource(
-        name="dump-q", api_key="dummy", cadence_hours=12, store=store, two_stage=False
+        name="dump-q", api_key="dummy", cadence_hours=12, store=store
     )
-    fake_text = MagicMock(type="text")
-    fake_text.text = '{"headlines":[]}'
-    fake_resp = MagicMock(content=[fake_text])
-    fake_resp.model_dump.return_value = {"id": "msg_abc", "content": [{"type": "text", "text": "..."}]}
+    discovery, structuring = _two_stage_responses('{"headlines":[]}')
+    discovery.model_dump.return_value = {"id": "msg_disc"}
+    structuring.model_dump.return_value = {"id": "msg_struct"}
 
     with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
         mock_client = MagicMock()
-        mock_client.messages.create.return_value = fake_resp
+        mock_client.messages.create.side_effect = [discovery, structuring]
         mock_anth.return_value = mock_client
         src.fetch()
 
-    dumps = list((tmp_path / "dumps").glob("dump_q__*.json"))
-    assert len(dumps) == 1
-    payload = dumps[0].read_text()
-    assert "msg_abc" in payload
+    discovery_dumps = list((tmp_path / "dumps").glob("dump_q__*__discovery.json"))
+    structuring_dumps = list((tmp_path / "dumps").glob("dump_q__*__structuring.json"))
+    assert len(discovery_dumps) == 1
+    assert len(structuring_dumps) == 1
+    payload = discovery_dumps[0].read_text()
+    assert "msg_disc" in payload
     assert "dump-q" in payload  # query_name appears in envelope
-
-
-SAMPLE_XML = """<news_digest as_of="2026-05-10 14:30">
-  <bucket name="A_japanese_insurers">
-    <item>
-      <headline_ja>東京海上、Q1決算を発表</headline_ja>
-      <original_headline lang="ja">東京海上、Q1決算を発表</original_headline>
-      <company>東京海上HD</company>
-      <published_jst>2026-05-10 09:00 JST</published_jst>
-      <source>日本経済新聞</source>
-      <url>https://www.nikkei.com/x</url>
-      <one_line_context_ja>純利益が前年同期比で増加。</one_line_context_ja>
-      <other_sources>Reuters, Bloomberg</other_sources>
-    </item>
-  </bucket>
-  <bucket name="B_japan_regulation">
-    <item>該当なし</item>
-  </bucket>
-  <bucket name="C_global_sector">
-    <item>
-      <headline_ja>Munich Re、Q1利益が増加</headline_ja>
-      <original_headline lang="en">Munich Re Q1 profit rises</original_headline>
-      <company>Munich Re</company>
-      <published_jst>2026-05-10 12:00 JST</published_jst>
-      <source>Reuters</source>
-      <url>https://reuters.com/y</url>
-      <one_line_context_ja>P&amp;C combined ratio improved.</one_line_context_ja>
-      <other_sources></other_sources>
-    </item>
-  </bucket>
-  <bucket name="D_rating_actions">
-    <item>該当なし</item>
-  </bucket>
-  <coverage_notes>
-    <searches_run>11</searches_run>
-    <gaps>特になし</gaps>
-  </coverage_notes>
-</news_digest>"""
-
-
-def test_bucket_xml_parses_minimal_response(store, tmp_path, monkeypatch):
-    from news_agent.sources import claude_research as cr_mod
-
-    monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
-
-    src = ClaudeResearchSource(
-        name="bx-q",
-        api_key="dummy",
-        cadence_hours=12,
-        store=store,
-        prompt_strategy="bucket_xml",
-    )
-    fake_text = MagicMock(type="text")
-    fake_text.text = SAMPLE_XML
-    fake_resp = MagicMock(content=[fake_text])
-    fake_resp.model_dump.return_value = {"id": "msg_xml"}
-
-    with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = fake_resp
-        mock_anth.return_value = mock_client
-        items = src.fetch()
-
-    assert len(items) == 2  # one A item, one C item; sentinels skipped
-    titles = [it.title for it in items]
-    assert "東京海上、Q1決算を発表" in titles
-    assert "Munich Re、Q1利益が増加" in titles
-    # raw_text carries bucket label
-    assert any(it.raw_text.startswith("[A]") for it in items)
-    assert any(it.raw_text.startswith("[C]") for it in items)
-    # source from <source> field, not query name
-    assert any(it.source == "日本経済新聞" for it in items)
-    assert any(it.source == "Reuters" for it in items)
-    # published_at parsed and in UTC
-    for it in items:
-        assert it.published_at is not None
-        assert it.published_at.tzinfo is not None
-
-
-def test_bucket_xml_uses_system_param_and_max_tokens(store):
-    src = ClaudeResearchSource(
-        name="bx-q",
-        api_key="dummy",
-        cadence_hours=12,
-        store=store,
-        prompt_strategy="bucket_xml",
-    )
-    fake_text = MagicMock(type="text")
-    fake_text.text = SAMPLE_XML
-
-    with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = MagicMock(content=[fake_text])
-        mock_anth.return_value = mock_client
-        src.fetch()
-
-        kwargs = mock_client.messages.create.call_args.kwargs
-        assert kwargs["max_tokens"] == 12000
-        assert "system" in kwargs
-        assert "specialist news analyst" in kwargs["system"]
-        # JST datetime injected
-        assert "JST" in kwargs["system"]
-
-
-def test_bucket_xml_handles_malformed_xml(store):
-    src = ClaudeResearchSource(
-        name="bx-q",
-        api_key="dummy",
-        cadence_hours=12,
-        store=store,
-        prompt_strategy="bucket_xml",
-    )
-    fake_text = MagicMock(type="text")
-    fake_text.text = "this is not xml at all"
-
-    with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = MagicMock(content=[fake_text])
-        mock_anth.return_value = mock_client
-        items = src.fetch()
-    assert items == []
 
 
 def test_two_stage_makes_two_calls(store, tmp_path, monkeypatch):
@@ -286,19 +227,18 @@ def test_two_stage_makes_two_calls(store, tmp_path, monkeypatch):
     monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
 
     src = ClaudeResearchSource(name="ts-q", api_key="dummy", cadence_hours=12, store=store)
-    discovery_text = MagicMock(type="text")
-    discovery_text.text = "- タイトル: Tokio Marine Q1\n  URL: https://x\n  媒体: Reuters\n  公開日時: 2026-05-10T00:00:00Z\n  要約: 要約"
-    discovery_resp = MagicMock(content=[discovery_text])
-    discovery_resp.model_dump.return_value = {"id": "stage1"}
-
-    structuring_text = MagicMock(type="text")
-    structuring_text.text = '{"headlines":[{"title":"Tokio Marine Q1","url":"https://x","source":"Reuters","published_at":"2026-05-10T00:00:00Z","summary_ja":"要約"}]}'
-    structuring_resp = MagicMock(content=[structuring_text])
-    structuring_resp.model_dump.return_value = {"id": "stage2"}
+    discovery, structuring = _two_stage_responses(
+        '{"headlines":[{"title":"Tokio Marine Q1","url":"https://x","source":"Reuters",'
+        '"published_at":"2026-05-10T00:00:00Z","summary_ja":"要約"}]}',
+        discovery_text=(
+            "- タイトル: Tokio Marine Q1\n  URL: https://x\n  媒体: Reuters\n"
+            "  公開日時: 2026-05-10T00:00:00Z\n  要約: 要約"
+        ),
+    )
 
     with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
         mock_client = MagicMock()
-        mock_client.messages.create.side_effect = [discovery_resp, structuring_resp]
+        mock_client.messages.create.side_effect = [discovery, structuring]
         mock_anth.return_value = mock_client
         items = src.fetch()
 
@@ -318,22 +258,69 @@ def test_two_stage_makes_two_calls(store, tmp_path, monkeypatch):
     assert "tools" not in second_call_kwargs
 
 
-def test_prompt_override_wins(store):
+# ---- new tests for prompt-rewrite contract --------------------------------
+
+
+def test_watchlists_injected_into_discovery_prompt(store, tmp_path, monkeypatch, watchlists):
+    from news_agent.sources import claude_research as cr_mod
+
+    monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
+
     src = ClaudeResearchSource(
-        name="q",
-        api_key="dummy",
-        cadence_hours=12,
-        store=store,
-        prompt_override="OVERRIDE PROMPT {max_headlines}",
+        name="wl-q", api_key="dummy", cadence_hours=12,
+        store=store, watchlists=watchlists,
     )
-    fake_text = MagicMock(type="text")
-    fake_text.text = '{"headlines":[]}'
+    discovery, structuring = _two_stage_responses('{"headlines":[]}')
+
     with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
         mock_client = MagicMock()
-        mock_client.messages.create.return_value = MagicMock(content=[fake_text])
+        mock_client.messages.create.side_effect = [discovery, structuring]
         mock_anth.return_value = mock_client
         src.fetch()
 
-        sent = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
-        assert sent.startswith("OVERRIDE PROMPT")
-        assert "30" in sent  # max_headlines default formatted in
+    discovery_prompt = mock_client.messages.create.call_args_list[0].kwargs[
+        "messages"
+    ][0]["content"]
+    # P1 entities listed under 日本Tier 1
+    assert "Tokio Marine" in discovery_prompt
+    assert "MS&AD" in discovery_prompt
+    # P2 entities listed under グローバル
+    assert "Munich Re" in discovery_prompt
+    assert "Allianz" in discovery_prompt
+    # JST timestamp injected
+    assert "JST" in discovery_prompt
+    # COVERAGE_NOTES instruction present
+    assert "COVERAGE_NOTES" in discovery_prompt
+
+
+def test_coverage_notes_forwarded_to_record_api_call(store, tmp_path, monkeypatch, watchlists):
+    from news_agent.sources import claude_research as cr_mod
+
+    monkeypatch.setattr(cr_mod, "RESPONSE_DUMP_DIR", tmp_path / "dumps")
+
+    src = ClaudeResearchSource(
+        name="cov-q", api_key="dummy", cadence_hours=12,
+        store=store, watchlists=watchlists,
+    )
+    discovery_text = (
+        "- タイトル: Some headline\n  URL: https://x\n  要約: 要約\n\n"
+        "COVERAGE_NOTES:\n"
+        "  searches_run: 9\n"
+        "  tier1_aggregators_hit: TDnet, FSA\n"
+        "  fallback_used: true\n"
+        "  gaps: 特になし\n"
+    )
+    discovery, structuring = _two_stage_responses('{"headlines":[]}', discovery_text=discovery_text)
+
+    with patch("news_agent.sources.claude_research.Anthropic") as mock_anth:
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [discovery, structuring]
+        mock_anth.return_value = mock_client
+        src.fetch()
+
+    cur = store.conn.execute(
+        "SELECT searches_run, tier1_aggregators_hit, fallback_used "
+        "FROM api_usage WHERE query_name='cov-q' ORDER BY id DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    assert row == (9, 2, 1)  # 2 aggregators (TDnet + FSA); fallback_used stored as 1

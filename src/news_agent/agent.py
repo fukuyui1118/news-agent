@@ -96,6 +96,7 @@ def build_sources(
     secrets: Secrets,
     *,
     store: Store,
+    watchlists: Watchlists | None = None,
     first_run: bool = False,
 ) -> list[Source]:
     """Build the per-cycle source list from feeds.yaml.
@@ -134,6 +135,7 @@ def build_sources(
             ClaudeResearchSource(
                 name=f"Claude Research: {q.name}",
                 api_key=secrets.anthropic_api_key,
+                watchlists=watchlists,
                 model=q.model,
                 cadence_hours=q.cadence_hours,
                 tier=q.tier,
@@ -265,7 +267,8 @@ def fetch_cycle(
     first_run = store.is_first_run()
 
     sources = build_sources(
-        config, feeds, secrets, store=store, first_run=first_run
+        config, feeds, secrets,
+        store=store, watchlists=watchlists, first_run=first_run,
     )
 
     counts = {
@@ -298,8 +301,16 @@ def fetch_cycle(
             continue
 
         counts["raw"] += len(raw_items)
+        # claude_research opt-in fallback: when the in-window yield is thin,
+        # the Stage-1 prompt is allowed to surface items up to 72h old. Widen
+        # the recency gate only for that source so RSS still respects the
+        # Phase-5 24h rule.
+        recency_hours = (
+            72 if isinstance(source, ClaudeResearchSource)
+            else config.collection.recency_hours
+        )
         items, n_no_pub, n_old = apply_recency_filter(
-            raw_items, recency_hours=config.collection.recency_hours
+            raw_items, recency_hours=recency_hours
         )
         counts["no_pubdate"] += n_no_pub
         counts["too_old"] += n_old

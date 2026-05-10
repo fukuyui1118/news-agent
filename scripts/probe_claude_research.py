@@ -1,13 +1,13 @@
-"""Compare Claude Research prompt strategies side-by-side.
+"""One-shot probe of the Claude Research two-stage pipeline.
 
-Fires two real Anthropic calls (cadence bypassed via store=None) and prints
-a comparison: parsed item counts, fresh-rate (<=24h), bucket distribution,
-URL overlap. Both responses are persisted under logs/claude_research/.
+Fires a single real Anthropic call (cadence bypassed via store=None) and prints
+parsed item count, fresh-rate (<=24h), and a sample of headlines. The raw
+discovery + structuring responses are persisted under logs/claude_research/.
 
 Usage:
     .venv/bin/python scripts/probe_claude_research.py
 
-Cost: roughly $0.80-$2.50 total (two Opus 4.7 + web_search + Haiku).
+Cost: roughly $0.40-$1.20 (one Opus 4.7 + web_search call + one Haiku call).
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
+from news_agent.config import load_watchlists  # noqa: E402
 from news_agent.sources.claude_research import (  # noqa: E402
     ClaudeResearchSource,
 )
@@ -41,7 +42,6 @@ def _summarise(label: str, items, response_path_hint: str = ""):
     now = datetime.now(timezone.utc)
     fresh = 0
     rows = []
-    bucket_counts: dict[str, int] = {}
     for it in items:
         if it.published_at is not None:
             age_h = (now - it.published_at).total_seconds() / 3600
@@ -51,16 +51,8 @@ def _summarise(label: str, items, response_path_hint: str = ""):
         else:
             age_str = "  ?  "
         rows.append((age_str, it.title, it.url, it.source))
-        # Bucket label is encoded in raw_text as "[A] ..." for bucket-XML
-        if it.raw_text and it.raw_text.startswith("["):
-            letter = it.raw_text[1:2]
-            bucket_counts[letter] = bucket_counts.get(letter, 0) + 1
 
     print(f"fresh (<=24h): {fresh}/{len(items)}")
-    if bucket_counts:
-        print("bucket distribution: " + ", ".join(
-            f"{k}={v}" for k, v in sorted(bucket_counts.items())
-        ))
     print("first 12 (age, source, title):")
     for age, title, url, source in rows[:12]:
         print(f"  {age}  [{source[:18]:18}]  {title[:80]}")
@@ -81,48 +73,22 @@ def main() -> int:
         print("ANTHROPIC_API_KEY missing in env", file=sys.stderr)
         return 2
 
-    print("Probing Claude Research strategies (two_stage vs bucket_xml)...")
-    print("Cost estimate: ~$0.80-$2.50. Sequential calls.\n")
+    print("Probing Claude Research two-stage pipeline...")
+    print("Cost estimate: ~$0.40-$1.20.\n")
 
-    two_stage = ClaudeResearchSource(
+    watchlists = load_watchlists(ROOT / "config" / "watchlists.yaml")
+
+    src = ClaudeResearchSource(
         name="probe_two_stage",
         api_key=api_key,
+        watchlists=watchlists,
         store=None,                  # bypass cadence
         max_headlines=30,
         max_search_uses=12,
-        prompt_strategy="two_stage",
     )
-    items_two_stage = two_stage.fetch()
+    items = src.fetch()
 
-    bucket_xml = ClaudeResearchSource(
-        name="probe_bucket_xml",
-        api_key=api_key,
-        store=None,
-        max_headlines=30,
-        max_search_uses=12,
-        prompt_strategy="bucket_xml",
-    )
-    items_bucket = bucket_xml.fetch()
-
-    _summarise("TWO_STAGE (current default)", items_two_stage, _latest_dump("probe_two_stage__"))
-    _summarise("BUCKET_XML (new strategy)", items_bucket, _latest_dump("probe_bucket_xml__"))
-
-    urls_a = {it.url for it in items_two_stage}
-    urls_b = {it.url for it in items_bucket}
-    overlap = urls_a & urls_b
-    print("\n=========== DIFF ===========")
-    print(f"two_stage = {len(urls_a)}, bucket_xml = {len(urls_b)}, overlap = {len(overlap)}")
-
-    only_b = urls_b - urls_a
-    if only_b:
-        print(f"\nURLs only in BUCKET_XML ({len(only_b)}):")
-        for u in list(only_b)[:10]:
-            print(f"  {u}")
-    only_a = urls_a - urls_b
-    if only_a:
-        print(f"\nURLs only in TWO_STAGE ({len(only_a)}):")
-        for u in list(only_a)[:10]:
-            print(f"  {u}")
+    _summarise("CLAUDE RESEARCH (two-stage)", items, _latest_dump("probe_two_stage__"))
 
     return 0
 
