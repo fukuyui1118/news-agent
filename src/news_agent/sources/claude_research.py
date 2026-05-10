@@ -13,11 +13,16 @@ import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import structlog
 from anthropic import Anthropic
 
 from .base import RawItem, Source
+
+# Where raw Claude responses are persisted (one file per successful call).
+# Created lazily on first dump; logs/ is already gitignored at repo root.
+RESPONSE_DUMP_DIR = Path("logs/claude_research")
 
 log = structlog.get_logger()
 
@@ -67,6 +72,65 @@ PROMPT_TEMPLATE = """\
 24時間より古い記事は除外してください。"""
 
 
+# Two-stage prompts. Stage 1 (discovery) uses web_search and asks for a loose
+# bullet-list — relieving Claude of any schema pressure during search. Stage 2
+# (structuring) takes the bullets and converts them to strict JSON via Haiku
+# without tools (cheap, ~$0.005/call).
+DISCOVERY_PROMPT_TEMPLATE = """\
+あなたは保険・再保険業界を専門とするシニア金融ニュース調査員です。
+
+`web_search` ツールを使用して、{since_iso} から {until_iso} （現在）の間に
+公開された保険セクターのニュース・ヘッドラインを収集してください。
+
+カバー範囲:
+  - 日本の保険会社（東京海上、損保ジャパン、MS&AD、第一生命、日本生命、
+    明治安田生命、住友生命、かんぽ生命、トーア再保険、T&D、ソニー生命、
+    アフラック生命 など）
+  - グローバル大手保険会社（Allianz、AXA、Zurich、Munich Re、Swiss Re、
+    AIG、Chubb、MetLife、Manulife、Lloyd's、Berkshire再保険 など）
+  - 資本市場イベント: IPO、M&A、増資、自社株買い
+  - 規制動向: 金融庁、EIOPA、NAIC、格付け機関の動き
+  - 格付け変更（上方/下方修正、Outlook変更）
+  - 戦略動向: 市場参入/撤退、提携、ジョイントベンチャー
+
+8〜15個の異なる検索クエリで、日本＋グローバル＋業界トレンドを幅広くカバー
+してください。報道機関、IRページ、規制当局のサイトを優先します。
+
+各ヘッドラインを以下の形式で箇条書き報告してください（JSONではなくフリーテキスト）:
+
+- タイトル: <原語のままのタイトル>
+  URL: <絶対URL>
+  媒体: <Reuters | Nikkei | Bloomberg | ...>
+  公開日時: <できる限り正確な ISO 8601 タイムゾーン付き>
+  要約: <1〜2文の日本語要約>
+
+最大{max_headlines}件まで。同一イベントの重複は1件に統合。
+**指定の時間範囲（過去24時間）より古い記事は除外してください。**"""
+
+
+STRUCTURING_PROMPT_TEMPLATE = """\
+以下のヘッドライン一覧を、指定のJSONスキーマに正確に変換してください。
+出力はJSONのみ。前置き、説明文、Markdownフェンス（```）は一切不要。
+
+スキーマ:
+{{
+  "headlines": [
+    {{
+      "title": "...",
+      "url": "https://...",
+      "source": "...",
+      "published_at": "ISO 8601 タイムゾーン付き",
+      "summary_ja": "..."
+    }}
+  ]
+}}
+
+ヘッドライン一覧:
+---
+{discovery_text}
+---"""
+
+
 def _strip_json_fences(text: str) -> str:
     """Pull a JSON object out of a Claude response.
 
@@ -100,6 +164,9 @@ class ClaudeResearchSource(Source):
         max_headlines: int = 30,
         max_search_uses: int = 12,
         store=None,        # for cadence check + api_usage logging
+        prompt_override: str | None = None,
+        two_stage: bool = True,
+        structuring_model: str = "claude-haiku-4-5",
     ) -> None:
         self.name = name
         self.tier = tier
@@ -109,6 +176,9 @@ class ClaudeResearchSource(Source):
         self.max_headlines = max_headlines
         self.max_search_uses = max_search_uses
         self.store = store
+        self.prompt_override = prompt_override
+        self.two_stage = two_stage
+        self.structuring_model = structuring_model
 
     # ---- cadence ----------------------------------------------------------
 
@@ -142,8 +212,6 @@ class ClaudeResearchSource(Source):
             )
             return []
 
-        prompt = PROMPT_TEMPLATE.format(max_headlines=self.max_headlines)
-
         client = Anthropic(api_key=self.api_key)
         t0 = time.monotonic()
         http_status = None
@@ -151,14 +219,20 @@ class ClaudeResearchSource(Source):
         error: str | None = None
 
         try:
-            resp = client.messages.create(
-                model=self.model,
-                max_tokens=8192,
-                tools=[{**WEB_SEARCH_TOOL, "max_uses": self.max_search_uses}],
-                messages=[{"role": "user", "content": prompt}],
-            )
+            if self.two_stage and self.prompt_override is None:
+                items = self._fetch_two_stage(client)
+            else:
+                template = self.prompt_override or PROMPT_TEMPLATE
+                prompt = template.format(max_headlines=self.max_headlines)
+                resp = client.messages.create(
+                    model=self.model,
+                    max_tokens=8192,
+                    tools=[{**WEB_SEARCH_TOOL, "max_uses": self.max_search_uses}],
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                self._dump_response(resp, elapsed_ms=int((time.monotonic() - t0) * 1000))
+                items = self._parse_response(resp)
             http_status = 200
-            items = self._parse_response(resp)
             article_count = len(items)
         except BaseException as e:
             error = f"{type(e).__name__}: {e}"
@@ -186,18 +260,127 @@ class ClaudeResearchSource(Source):
         )
         return items
 
+    # ---- two-stage path -------------------------------------------------
+
+    def _fetch_two_stage(self, client: Anthropic) -> list[RawItem]:
+        """Discovery (Opus + web_search, prose) → Structuring (Haiku, JSON)."""
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=24)
+        discovery_prompt = DISCOVERY_PROMPT_TEMPLATE.format(
+            since_iso=since.isoformat(timespec="minutes"),
+            until_iso=now.isoformat(timespec="minutes"),
+            max_headlines=self.max_headlines,
+        )
+
+        # Stage 1 — discovery with web_search
+        s1_t0 = time.monotonic()
+        discovery_resp = client.messages.create(
+            model=self.model,
+            max_tokens=8192,
+            tools=[{**WEB_SEARCH_TOOL, "max_uses": self.max_search_uses}],
+            messages=[{"role": "user", "content": discovery_prompt}],
+        )
+        s1_elapsed = int((time.monotonic() - s1_t0) * 1000)
+        self._dump_response(discovery_resp, elapsed_ms=s1_elapsed, suffix="discovery")
+
+        discovery_text = "".join(
+            (b.text or "") for b in discovery_resp.content
+            if getattr(b, "type", None) == "text"
+        )
+        if not discovery_text.strip():
+            log.warning("claude_research.discovery.empty", name=self.name)
+            return []
+
+        # Stage 2 — structuring (no tools, cheap model)
+        structuring_prompt = STRUCTURING_PROMPT_TEMPLATE.format(
+            discovery_text=discovery_text
+        )
+        s2_t0 = time.monotonic()
+        structuring_resp = client.messages.create(
+            model=self.structuring_model,
+            max_tokens=8192,
+            messages=[{"role": "user", "content": structuring_prompt}],
+        )
+        s2_elapsed = int((time.monotonic() - s2_t0) * 1000)
+        self._dump_response(structuring_resp, elapsed_ms=s2_elapsed, suffix="structuring")
+
+        log.info(
+            "claude_research.two_stage.done",
+            name=self.name,
+            discovery_ms=s1_elapsed,
+            structuring_ms=s2_elapsed,
+            discovery_chars=len(discovery_text),
+        )
+        return self._parse_response(structuring_resp)
+
+    # ---- response persistence -------------------------------------------
+
+    def _dump_response(self, resp, *, elapsed_ms: int, suffix: str = "") -> None:
+        """Write the raw Anthropic response to logs/claude_research/.
+
+        Best-effort. Any failure is logged and swallowed — must not break
+        the fetch path. Uses pydantic `model_dump` when available, falls
+        back to attribute introspection.
+        """
+        try:
+            RESPONSE_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "_", self.name.lower()).strip("_") or "claude"
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            tag = f"__{suffix}" if suffix else ""
+            path = RESPONSE_DUMP_DIR / f"{slug}__{ts}{tag}.json"
+
+            try:
+                # anthropic SDK message objects expose pydantic model_dump
+                resp_payload = resp.model_dump(mode="json")
+            except Exception:
+                resp_payload = {
+                    "id": getattr(resp, "id", None),
+                    "model": getattr(resp, "model", None),
+                    "stop_reason": getattr(resp, "stop_reason", None),
+                    "content": [self._block_to_dict(b) for b in getattr(resp, "content", [])],
+                    "usage": getattr(resp, "usage", None) and self._block_to_dict(resp.usage),
+                }
+
+            envelope = {
+                "query_name": self.name,
+                "model": self.model,
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "elapsed_ms": elapsed_ms,
+                "response": resp_payload,
+            }
+            path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2, default=str))
+            log.info("claude_research.dump.saved", path=str(path), name=self.name)
+        except Exception as e:
+            log.warning(
+                "claude_research.dump.failed",
+                name=self.name,
+                error=f"{type(e).__name__}: {e}",
+            )
+
+    @staticmethod
+    def _block_to_dict(block) -> dict:
+        if hasattr(block, "model_dump"):
+            try:
+                return block.model_dump(mode="json")
+            except Exception:
+                pass
+        return {k: str(v) for k, v in vars(block).items()} if hasattr(block, "__dict__") else {"repr": repr(block)}
+
     def _parse_response(self, resp) -> list[RawItem]:
         # Concatenate ALL text blocks. Claude with web_search returns content
         # as a sequence of (server_tool_use, tool_result, text, server_tool_use,
-        # tool_result, text, …, final text). The JSON answer can span the last
-        # text block OR be split across earlier text blocks; safest is to join.
+        # tool_result, text, …, final text). When Claude streams long JSON it
+        # may split a single string value across multiple text blocks (e.g.
+        # `"summary_ja": ` in one block, the JP value in the next). Joining
+        # with "" reconstructs the original stream losslessly — joining with
+        # "\n" injects newlines inside string values and breaks the JSON.
         text_parts: list[str] = []
         for block in resp.content:
             if getattr(block, "type", None) == "text":
                 t = block.text or ""
                 if t:
                     text_parts.append(t)
-        text = "\n".join(text_parts)
+        text = "".join(text_parts)
         text = _strip_json_fences(text)
         if not text:
             log.warning("claude_research.empty_text", name=self.name)
