@@ -202,7 +202,7 @@ class InoreaderClient:
 # ---- bootstrap helpers (used by scripts/inoreader_oauth_bootstrap.py) -----
 
 
-def build_authorization_url(app_id: str, *, redirect_uri: str = "urn:ietf:wg:oauth:2.0:oob",
+def build_authorization_url(app_id: str, *, redirect_uri: str = "http://localhost:8765/callback",
                             scope: str = "read", state: str = "news_agent") -> str:
     """Construct the OAuth authorization URL the user visits in browser."""
     from urllib.parse import urlencode
@@ -221,7 +221,7 @@ def exchange_code_for_tokens(
     app_id: str,
     app_secret: str,
     code: str,
-    redirect_uri: str = "urn:ietf:wg:oauth:2.0:oob",
+    redirect_uri: str = "http://localhost:8765/callback",
     timeout_sec: float = 20.0,
 ) -> dict:
     """Exchange the authorization code for access/refresh tokens.

@@ -213,7 +213,7 @@ The 14 Inoreader keyword tags in `feeds.yaml` are fetched via Inoreader's REST A
 1. **Register an app** at <https://www.inoreader.com/developers/>. Click "Create application", fill in:
    - **Name**: `News Agent` (or whatever)
    - **Description**: Personal automation
-   - **Redirect URI**: `urn:ietf:wg:oauth:2.0:oob` (out-of-band — no callback server needed)
+   - **Redirect URI**: `http://localhost:8765/callback` (paste EXACTLY — Inoreader rejects out-of-band URIs)
    - **Scopes**: `read`
 2. Copy the resulting **App ID** and **App Secret** into your `.env`:
 
@@ -228,7 +228,7 @@ The 14 Inoreader keyword tags in `feeds.yaml` are fetched via Inoreader's REST A
    .venv/bin/python scripts/inoreader_oauth_bootstrap.py
    ```
 
-   It prints an authorization URL. Visit it in your browser, log in, click "Allow". Inoreader displays a short authorization code; paste that back into the script. The script exchanges it for tokens and prints:
+   The script binds `http://localhost:8765/callback`, opens the auth URL in your default browser, and waits for the redirect. Log in to Inoreader and click "Allow"; your browser briefly hits localhost (showing a "✅ Authorization captured" page), then the script prints:
 
    ```
    INOREADER_REFRESH_TOKEN=<long opaque string>

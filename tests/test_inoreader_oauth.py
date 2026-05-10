@@ -165,9 +165,15 @@ def test_persist_refresh_token_appends_when_missing(tmp_path):
 def test_build_authorization_url_includes_required_params():
     url = build_authorization_url("APP-ID-123")
     assert "client_id=APP-ID-123" in url
-    assert "redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob" in url
+    # Default redirect URI is the localhost callback (Inoreader rejects OOB).
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A8765%2Fcallback" in url
     assert "response_type=code" in url
     assert "scope=read" in url
+
+
+def test_build_authorization_url_accepts_custom_redirect():
+    url = build_authorization_url("APP", redirect_uri="http://localhost:9999/cb")
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcb" in url
 
 
 def test_exchange_code_for_tokens_returns_response_body():
