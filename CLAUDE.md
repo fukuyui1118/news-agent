@@ -30,23 +30,26 @@ python -m news_agent --stats                      # DB/feed/api_usage summary
 - **P3**: never emailed. Visible only in the dashboard.
 - **DROPPED**: never emailed. Persisted only so dedup catches them next tick.
 
-## Pipeline (data flow)
+## Pipeline (data flow, Phase 9.2)
 1. Fetch (RSS × N + Claude Research × 1) → 2. Canonicalize URL → 3. Hash → 4. Dedup check
-5. Recency filter — RSS: 24h, Claude Research: 72h (per-source override)
-6. **Entity classify** (P1 = Japan, P2 = global) — matched stories bypass the relevance gate
-7. **Relevance gate** (only for unmatched stories):
-   - Tier 1 source: always relevant → P3
-   - Tier 2/3 source: requires ≥1 business keyword → P3, else DROPPED
-8. Persist with priority ∈ {P1, P2, P3, DROPPED}
-9. **Curate**: one Haiku call collects the 12h P1+P2 rows → ranked, dedup'd, summarized digest entries
-10. **Email** the curated digest (or print under `--dry-run`)
-11. **DROPPED / P3**: never emailed; rows exist for dedup / dashboard
+5. Recency filter — RSS/Inoreader: 24h, Claude Research: 72h (per-source override)
+6. **AI classify (one Opus call)**: batched across all fresh items.
+   - P1 = Japan-HQ insurer / regulator / financial markets
+   - P2 = global insurer business news
+   - P3 = everything else (sports sponsorship, naming-rights events, noise)
+   - Watchlist entities injected as prompt context. Falls back to all-P3 on parse/API failure.
+7. Persist with priority ∈ {P1, P2, P3}. (DROPPED is gone — the AI classifier directly demotes noise to P3.)
+8. **AI email-compose (one Opus call)**: in `run_digest`, takes the 12h P1+P2 rows → ranked, dedup'd, JP-headline + bullet summary entries (≤15). Falls back to per-row Haiku summarize on parse failure.
+9. **Email** the composed digest (or print under `--dry-run`).
+10. **P3**: never emailed; rows exist for dashboard visibility + dedup.
 
 ## Architecture (one-line each)
-- `agent.py` — orchestrates `fetch_cycle()`, `run_digest_now()`, `run_fetch_and_digest_now()`. Per-source recency override: claude_research items get a 72h gate; all other sources get 24h.
+- `agent.py` — orchestrates `fetch_cycle()`, `run_digest_now()`, `run_fetch_and_digest_now()`. Two-pass: per-source fetch+recency, then one batched `ai_classifier.classify_items()` call across all collected items, then persistence.
 - `scheduler.py` — APScheduler `BlockingScheduler` with **one job**: `CronTrigger(hour='7,19', minute=0, timezone='Asia/Tokyo')` runs `run_once()` then `run_digest_now()` sequentially.
-- `digest.py` — runs `digest_eligible_stories(hours=12)` → calls `curator.curate_digest()` (one Haiku call) → mailer sends.
-- `curator.py` — Claude Haiku batched aggregation/prioritization. Single function `curate_digest(rows, summarizer)` returns ranked `DigestEntry` list. Falls back to per-row `Summarizer.summarize()` if the batched call fails.
+- `digest.py` — runs `digest_eligible_stories(hours=12)` → calls `ai_email.compose_email()` (one Opus call) → mailer sends.
+- `ai_classifier.py` — Claude Opus batched classifier. `classify_items(items, watchlists, *, api_key)` returns `{idx: "P1"|"P2"}`; missing indices = P3. Falls back to all-P3 on parse/API failure.
+- `ai_email.py` — Claude Opus batched email composer. `compose_email(rows, summarizer)` returns ranked `DigestEntry` list capped at `max_entries=15`. Falls back to per-row Haiku summarize.
+- `classifier.py` / `relevance.py` — **deprecated** (regex-based). No longer imported by the pipeline; kept for now as dead code.
 - `sources/rss.py` — feedparser-based; `trust_freshness` flag for RDF feeds without per-item pubdate.
 - `sources/claude_research.py` — Claude Opus 4.7 + `web_search`, two-stage prompt (Phase 8). Cadence-gated 12h via `api_usage` table; surfaces COVERAGE_NOTES (`searches_run`, `tier1_aggregators_hit`, `fallback_used`, `gaps`) into telemetry columns.
 - `store.py` — SQLite. `seen` columns: `url_hash PK, url, title, source, collected_at, published_at, priority, summary, emailed_at, dropped_reason, content_hash`. `api_usage` columns include `searches_run`, `tier1_aggregators_hit`, `fallback_used`. **`collected_at`** = UTC ISO8601 when our agent first saw the story. **`published_at`** = source's own pub date.
@@ -84,9 +87,10 @@ The `apply_recency_filter` in `agent.py` runs once per source: 72h for `ClaudeRe
 - Stronger / different research scope → edit `DISCOVERY_PROMPT_TEMPLATE` in `sources/claude_research.py` (Tier definitions, search strategy).
 
 ## Source tiers
-- **Tier 1** — Claude Research source. Gate is skipped because the prompt itself has its own quality filter (Tier 1/2/3 + confidence taxonomy).
-- **Tier 2** — business-focused industry sites (Reinsurance News, Artemis). Gate applies but signal is strong.
-- **Tier 3** — generalist insurance press (Insurance Journal, Carrier Management, Insurance Business, PR/Globe Newswire). Gate does heavy lifting.
+The "tier" label is preserved as telemetry on each source but no longer drives behavior — the AI classifier judges per-item now. Historical meaning:
+- **Tier 1** — Claude Research source (Opus + web_search Stage 1 + Haiku Stage 2 in `sources/claude_research.py`).
+- **Tier 2** — business-focused trade press + Inoreader keyword tags (Reinsurance News, Artemis, Inoreader: *).
+- **Tier 3** — generalist insurance press (Insurance Journal, Carrier Management, Insurance Business, PR/Globe Newswire).
 
 ## Conventions
 - One source failure must not crash a cycle — wrap each `fetch()` in try/except, log, continue.
@@ -153,8 +157,10 @@ Filters in the sidebar: priority (P1/P2/P3/DROPPED), email status, source, title
 - Phase 8 (Claude Opus 4.7 + web_search replaces NewsAPI/Google News): done.
 - Phase 8.3 (two-stage prompt rewrite: Tier 1/2/3 system, 72h fallback, COVERAGE_NOTES telemetry, bucket-XML retired): done.
 - Phase 9 (twice-daily 07:00/19:00 JST cron + Claude curator step + drop 3h P1 batch): done.
-- Phase 9.1 (26 Inoreader keyword feeds added — pending user's manual Inoreader Pro setup): in progress.
+- Phase 9.1 (Inoreader keyword feeds, 14 per-carrier tags via Pro public-RSS): done.
+- Phase 9.2 (replace regex classifier + relevance gate + curator with two-call Opus AI classifier + email composer): done.
 - Phase 8.4 (prompt caching on Stage-1 system block; surface tier/category/gaps in dashboard): not started.
+- Inoreader true-recency fix (article-meta fetch to get real publish date): not started.
 
 ## AWS EC2 deployment
 See `deploy/README.md` for full instructions. Bootstrap script at `deploy/setup-ec2.sh`. systemd units at `deploy/news-agent.service` and `deploy/news-dashboard.service`. Target: t4g.nano in ap-northeast-1, ~$4/mo. Browser-use deps are in the `[nikkei]` extra so the slim deploy installs only ~150MB.

@@ -1,20 +1,20 @@
-"""Digest curator: one Claude call that aggregates + prioritizes the day's
-P1+P2 stories into a ranked, deduplicated digest.
+"""AI-based email composer: one Claude Opus call drafts the digest's
+Japanese headlines + summaries + structured email body.
 
-Replaces the old per-row summarize loop in `digest.py`. Inputs are StoryRow
-objects from the last 12h; output is `DigestEntry` objects compatible with
-the existing mailer.
+Replaces `curator.py`. Same input/output contract for the mailer:
+takes `StoryRow` objects from `digest_eligible_stories`, returns
+`DigestEntry` objects ready for `mailer.send_digest`.
 
-Falls back to per-row summarize() if the batched Claude call fails to parse
-or returns empty entries — never silent-empties a digest run.
+Falls back to per-row `Summarizer.summarize` (Haiku) on parse/API
+failure. Hard-caps at `max_entries`.
 """
 from __future__ import annotations
 
 import json
 import re
+import time
 
 import structlog
-from anthropic import Anthropic
 
 from .mailer import DigestEntry
 from .store import StoryRow
@@ -22,24 +22,24 @@ from .summarizer import Article, Summarizer
 
 log = structlog.get_logger()
 
-DEFAULT_CURATOR_MODEL = "claude-haiku-4-5"
+DEFAULT_EMAIL_MODEL = "claude-opus-4-7"
 
-CURATOR_PROMPT_TEMPLATE = """\
+EMAIL_PROMPT_TEMPLATE = """\
 あなたは保険・再保険セクター担当のシニア・エディターです。
-以下のヘッドライン群（過去12時間で収集）を読み、機関投資家デスク向けの
-ダイジェストに編集してください。
+過去12時間で収集された P1（日本/規制/金融）と P2（グローバル保険）の
+ヘッドラインを、東京の機関投資家デスク向けダイジェストに編集してください。
 
 # タスク
 1. 同一イベントの重複（複数媒体の同記事）は1件に統合し、媒体名を集約
-2. Tier 1 イベント（格付け / 資本市場取引 / M&A / 規制 / 大型損害）を上位に配置
-3. 各イベントに日本語ヘッドライン1行（30文字以内）と要約箇条書き（3〜5項目、各40文字以内）を作成
-4. 重要度の低いものは除外してよい（最大{max_entries}件）
-5. priority は元の P1 / P2 を尊重する
+2. P1 を上位、P2 を下位に並べる
+3. 各イベントに30文字以内の日本語ヘッドラインと、3〜5項目の箇条書き要約を作成
+4. 重要度の低い P2 は除外可（最大 {max_entries} 件まで）
+5. 宣伝的・誇張的な表現を避け、財務・戦略事実（金額、当事者、日付）を優先
 
-# 入力ヘッドライン
+# 入力ヘッドライン（過去12時間、P1優先）
 {rows_text}
 
-# 出力（JSONのみ、前置き・コードフェンス無し）
+# 出力（JSONのみ。前置き・コードフェンス無し）
 {{
   "entries": [
     {{
@@ -51,42 +51,38 @@ CURATOR_PROMPT_TEMPLATE = """\
       "summary_bullets": ["...", "...", "..."]
     }}
   ]
-}}
-"""
+}}"""
 
 
-def curate_digest(
+def compose_email(
     rows: list[StoryRow],
     summarizer: Summarizer,
     *,
     max_entries: int = 15,
-    model: str = DEFAULT_CURATOR_MODEL,
+    model: str = DEFAULT_EMAIL_MODEL,
 ) -> list[DigestEntry]:
-    """One Claude call that aggregates, prioritizes, and summarizes the
-    digest in Japanese. Returns DigestEntry objects compatible with the
-    existing mailer.
+    """Single Opus call → ranked, deduplicated DigestEntry list.
 
-    On failure (empty parse / invalid JSON / API error) falls back to
-    per-row Summarizer.summarize() so the digest never silent-empties.
+    Falls back to per-row Haiku summarize on parse/API failure.
+    Hard-caps output at max_entries. Reuses `summarizer.client` so callers
+    don't need to pass api_key separately.
     """
     if not rows:
         return []
 
-    # Truncate input to top max_entries*2 — store.digest_eligible_stories
-    # already orders P1 before P2 by collected_at desc, so the slice gives
-    # Haiku the highest-priority rows with some signal beyond max_entries.
     candidates = rows[: max_entries * 2]
 
     rows_text = "\n".join(
         f"[{r.priority}] {r.title} | source={r.source} | url={r.url} | published_at={r.published_at or ''}"
         for r in candidates
     )
-    prompt = CURATOR_PROMPT_TEMPLATE.format(
+    prompt = EMAIL_PROMPT_TEMPLATE.format(
         rows_text=rows_text,
         max_entries=max_entries,
     )
 
-    client = summarizer.client  # reuse the existing Anthropic client
+    client = summarizer.client  # reuse existing Anthropic client
+    t0 = time.monotonic()
     try:
         resp = client.messages.create(
             model=model,
@@ -94,16 +90,17 @@ def curate_digest(
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
-        log.warning("curator.api.failed", error=f"{type(e).__name__}: {e}")
+        log.warning("ai_email.api.failed", error=f"{type(e).__name__}: {e}")
         return _fallback_per_row(candidates, summarizer, max_entries=max_entries)
 
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
     text = "".join(
         (b.text or "") for b in resp.content if getattr(b, "type", None) == "text"
     )
-    parsed = _parse_curator_json(text)
+    parsed = _parse_email_json(text)
     if parsed is None:
-        log.warning("curator.parse.failed", preview=text[:200])
-        return _fallback_per_row(rows, summarizer)
+        log.warning("ai_email.parse.failed", preview=text[:200])
+        return _fallback_per_row(candidates, summarizer, max_entries=max_entries)
 
     entries: list[DigestEntry] = []
     for item in parsed.get("entries", []):
@@ -128,22 +125,22 @@ def curate_digest(
         )
 
     if not entries:
-        log.warning("curator.empty_entries", row_count=len(rows))
+        log.warning("ai_email.empty_entries", row_count=len(rows))
         return _fallback_per_row(candidates, summarizer, max_entries=max_entries)
 
-    # Hard cap — even if Claude returned more entries than requested.
     entries = entries[:max_entries]
     log.info(
-        "curator.done",
+        "ai_email.done",
         input_rows=len(rows),
         candidate_rows=len(candidates),
         output_entries=len(entries),
+        elapsed_ms=elapsed_ms,
         model=model,
     )
     return entries
 
 
-def _parse_curator_json(text: str) -> dict | None:
+def _parse_email_json(text: str) -> dict | None:
     text = text.strip()
     m = re.match(r"^```(?:json)?\s*\n(.*?)\n```\s*$", text, re.DOTALL)
     if m:
@@ -153,19 +150,16 @@ def _parse_curator_json(text: str) -> dict | None:
     if start < 0 or end <= start:
         return None
     try:
-        return json.loads(text[start : end + 1], strict=False)
+        obj = json.loads(text[start : end + 1], strict=False)
     except json.JSONDecodeError:
         return None
+    return obj if isinstance(obj, dict) else None
 
 
 def _fallback_per_row(
     rows: list[StoryRow], summarizer: Summarizer, *, max_entries: int = 15
 ) -> list[DigestEntry]:
-    """Per-row Summarizer call — used when batched curation fails.
-
-    Caps at `max_entries` to prevent the email from blowing up to 100+ rows
-    when the batched curator parse-fails on a large input set.
-    """
+    """Per-row Summarizer call when batched email-compose fails. Capped."""
     rows = rows[:max_entries]
     entries: list[DigestEntry] = []
     for r in rows:
@@ -180,7 +174,7 @@ def _fallback_per_row(
         try:
             summary = summarizer.summarize(article)
         except Exception as e:
-            log.warning("curator.fallback.summarize_failed", url=r.url, error=str(e))
+            log.warning("ai_email.fallback.summarize_failed", url=r.url, error=str(e))
             continue
         entries.append(
             DigestEntry(
@@ -192,5 +186,5 @@ def _fallback_per_row(
                 summary_bullets=summary.bullets,
             )
         )
-    log.info("curator.fallback.done", input_rows=len(rows), output_entries=len(entries))
+    log.info("ai_email.fallback.done", input_rows=len(rows), output_entries=len(entries))
     return entries

@@ -4,7 +4,7 @@ A long-running agent that monitors insurance and reinsurance news, classifies ea
 
 ## What it does, in one paragraph
 
-Twice a day at **07:00 and 19:00 JST**, the agent runs one full pipeline tick: fetches news from RSS feeds (13 native + 26 user-curated Inoreader keyword feeds), asks **Claude Opus 4.7 + web_search** to research the past 12 hours of insurance-sector news via a structured two-stage prompt, dedup-checks and classifies each headline by entity (Tokio Marine, Munich Re, etc.) and by relevance keywords, persists everything in `seen.db`, then asks Claude Haiku to **curate** the surviving P1+P2 items into a ranked, deduplicated digest with Japanese summaries and emails it. P3 items go to the dashboard only; DROPPED items exist only so dedup catches them next tick.
+Twice a day at **07:00 and 19:00 JST**, the agent runs one full pipeline tick: fetches news from RSS feeds (13 native + 14 user-curated Inoreader keyword tags), asks **Claude Opus 4.7 + web_search** to research the past 12 hours of insurance-sector news via a structured two-stage prompt, then makes **one Opus call to classify** every fresh item into P1 (Japan / regulatory / financial), P2 (global insurer business news), or P3 (everything else — sports sponsorships, naming-rights events, noise). Items are persisted with the AI-assigned priority. A **second Opus call** drafts a curated Japanese-language digest from the last 12 hours of P1+P2 items, ranks Tier-1 events first, deduplicates same-event clusters, and emails it. P3 items go to the dashboard only.
 
 ---
 
@@ -76,34 +76,32 @@ The prompt runs in two stages:
    └────────┬────────────┘
             ▼
    ┌─────────────────────┐
-   │ 5. Entity classify  │  word-boundary regex against watchlists.yaml
-   │                     │  P1 (Japan-HQ) wins over P2 (global)
+   │ 5. AI classify (Opus)│ one batched Claude Opus call across ALL fresh items
+   │                     │  → P1 = Japan / regulatory / financial
+   │                     │  → P2 = global insurer business news
+   │                     │  → P3 = everything else (sports, sponsorships, noise)
+   │                     │  Watchlist entities injected into the prompt as
+   │                     │  context. Falls back to all-P3 on parse/API failure.
    └────────┬────────────┘
             ▼
    ┌─────────────────────┐
-   │ 6. Relevance gate   │  unmatched stories only:
-   │                     │    Tier 1 source → always P3 (skip gate)
-   │                     │    Tier 2/3 source → ≥1 business keyword → P3, else DROPPED
+   │ 6. Persist          │  INSERT OR IGNORE on url_hash with AI priority
    └────────┬────────────┘
             ▼
    ┌─────────────────────┐
-   │ 7. Persist          │  INSERT OR IGNORE on url_hash; record dropped_reason
-   └────────┬────────────┘
-            ▼
-   ┌─────────────────────┐
-   │ 8. Curate + email   │  one Claude Haiku call: dedup same-event clusters,
-   │                     │  rank Tier 1 first, ≤15 entries with JP summaries
+   │ 7. Compose + email  │  one Claude Opus call: dedup same-event clusters,
+   │   (Opus)            │  rank P1 first, ≤15 entries with JP headlines + bullets
    │                     │  → single digest email per tick (07:00 / 19:00 JST)
    │                     │  P3 → dashboard only, no email
-   │                     │  DROPPED → never emailed; row exists only for dedup
+   │                     │  Falls back to per-row Haiku summarize on parse failure
    └─────────────────────┘
 ```
 
 Source-tier rules:
 
-- **Tier 1** — carrier IR / press release feeds, Claude Research. Relevance gate skipped.
-- **Tier 2** — business-focused industry sites (Reinsurance News, Artemis). Gate applies but signal is strong.
-- **Tier 3** — generalist insurance press (Insurance Journal). Gate does heavy lifting.
+- **Tier 1** — Claude Research source. Tier-1 was historically the "skip relevance gate" tier; with the AI classifier the gate concept is gone, but the Tier-1 label is preserved on the source for telemetry.
+- **Tier 2** — business-focused industry sites (Reinsurance News, Artemis) + Inoreader keyword tags. AI classifier judges per-item.
+- **Tier 3** — generalist insurance press (Insurance Journal, Carrier Management, PR/Globe Newswire). AI classifier judges per-item.
 
 A single source failure never crashes a cycle — every `fetch()` is wrapped in try/except, logged, and the cycle continues.
 
@@ -245,9 +243,13 @@ ssh -i ~/.ssh/news-agent-key.pem ubuntu@<host> \
 | Component | Monthly |
 |---|---|
 | EC2 t4g.nano + 8GB EBS + outbound | ~$3.81 |
-| Anthropic API — Claude Research (Opus 4.7 + Haiku 4.5, 2 calls/day) | ~$30–60 |
-| Anthropic API — P1/digest summaries (Haiku 4.5) | ~$1–3 |
+| Anthropic — Claude Research (Opus 4.7 + Haiku 4.5, 2 calls/day) | ~$30–60 |
+| Anthropic — AI Classifier (Opus 4.7 batched, 2 calls/day) | ~$12 |
+| Anthropic — AI Email Composer (Opus 4.7, 2 calls/day) | ~$30 |
+| Anthropic — Inoreader Pro (paid externally) | $7.50/mo annual |
 | Gmail SMTP | free |
-| **Total** | **~$35–67/month** |
+| **Total** | **~$83–113/month** |
 
-Drop Claude Research's `model` to `claude-haiku-4-5` to cut the bulk of the API spend ~10×. Disable Claude Research entirely (`enabled: false`) to fall back to RSS-only at near-zero cost.
+Cost-down options if needed:
+- AI Classifier → Haiku 4.5: saves ~$11/mo (yes/no per item doesn't need Opus reasoning).
+- Disable Claude Research entirely (`enabled: false`): saves $30–60/mo, falls back to RSS-only.

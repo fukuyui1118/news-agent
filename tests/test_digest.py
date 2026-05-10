@@ -53,7 +53,7 @@ def test_digest_default_lookback_is_12h():
     assert kwargs["hours"] == 12
 
 
-def test_digest_calls_curator_and_sends_mailer():
+def test_digest_calls_composer_and_sends_mailer():
     store = MagicMock(spec=Store)
     store.digest_eligible_stories.return_value = [
         _row(priority="P1", title="A"),
@@ -64,12 +64,12 @@ def test_digest_calls_curator_and_sends_mailer():
     mailer.dry_run = True
 
     with patch(
-        "news_agent.digest.curate_digest",
+        "news_agent.digest.compose_email",
         return_value=[_entry(priority="P1", title="A"), _entry(priority="P2", title="B")],
-    ) as mock_curate:
+    ) as mock_compose:
         result = run_digest(store=store, summarizer=summarizer, mailer=mailer)
 
-    mock_curate.assert_called_once()
+    mock_compose.assert_called_once()
     assert result["summarized"] == 2
     assert result["sent"] is True
     mailer.send_digest.assert_called_once()
@@ -78,14 +78,14 @@ def test_digest_calls_curator_and_sends_mailer():
     assert {e.priority for e in payload.entries} == {"P1", "P2"}
 
 
-def test_digest_curator_empty_skips_send():
+def test_digest_composer_empty_skips_send():
     store = MagicMock(spec=Store)
     store.digest_eligible_stories.return_value = [_row(title="A")]
     summarizer = MagicMock(spec=Summarizer)
     mailer = MagicMock(spec=Mailer)
     mailer.dry_run = True
 
-    with patch("news_agent.digest.curate_digest", return_value=[]):
+    with patch("news_agent.digest.compose_email", return_value=[]):
         result = run_digest(store=store, summarizer=summarizer, mailer=mailer)
 
     assert result["sent"] is False

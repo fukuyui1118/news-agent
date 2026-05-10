@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from .curator import curate_digest
+from .ai_email import compose_email
 from .mailer import DigestPayload, Mailer
 from .store import Store
 from .summarizer import Summarizer
@@ -25,17 +25,18 @@ def run_digest(
     """Twice-daily digest at 07:00 / 19:00 JST. Includes P1+P2 from the
     last `hours` (default 12 — matches the cron interval, no overlap).
 
-    The curator step (one Claude call) aggregates same-event clusters,
-    ranks Tier 1 first, and emits a curated DigestEntry list.
+    The email-composer step (one Claude Opus call via `ai_email.compose_email`)
+    aggregates same-event clusters, ranks P1 first, and emits a curated
+    DigestEntry list capped at 15 entries.
     """
     rows = store.digest_eligible_stories(hours=hours, limit=limit)
     if not rows:
         log.info("digest.empty", hours=hours)
         return {"summarized": 0, "failed": 0, "suppressed_dup": 0, "sent": False}
 
-    entries = curate_digest(rows, summarizer)
+    entries = compose_email(rows, summarizer)
     if not entries:
-        log.info("digest.curator_empty", input_rows=len(rows))
+        log.info("digest.composer_empty", input_rows=len(rows))
         return {
             "summarized": 0,
             "failed": 0,

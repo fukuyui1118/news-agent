@@ -7,21 +7,18 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from .classifier import classify
+from .ai_classifier import classify_items
 from .config import (
     Config,
     Feeds,
-    Relevance,
     Secrets,
     Watchlists,
     load_concept_uris,
     load_config,
     load_feeds,
-    load_relevance,
     load_watchlists,
 )
 from .mailer import Mailer, MailerConfig
-from .relevance import is_relevant
 from .sources.base import RawItem, Source
 from .sources.claude_research import ClaudeResearchSource
 from .sources.newsapi import NewsApiSource  # retained but no longer instantiated
@@ -68,16 +65,6 @@ def apply_recency_filter(
 
 # Backwards-compat constant for existing tests / external callers.
 RECENCY_HOURS = 24
-
-
-def _normalize_text(text: str) -> str:
-    return (
-        (text or "")
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("“", '"')
-        .replace("”", '"')
-    )
 
 
 def _compute_date_window(first_run: bool) -> tuple[str, str]:
@@ -255,13 +242,14 @@ def _append_to_stats_log(block: str, log_path: Path) -> None:
 def fetch_cycle(
     config: Config,
     watchlists: Watchlists,
-    relevance: Relevance,
     feeds: Feeds,
     secrets: Secrets,
     store: Store,
 ) -> dict:
-    """Phase 8 fetch_cycle. Reads feeds.yaml; native_rss + claude_research
-    layers; per-feed stats + cycle-end summary block.
+    """Phase 9.2 fetch_cycle. Two-pass design:
+      Pass 1 — fetch all sources in parallel + per-source recency filter.
+      Pass 2 — single Opus batched classify call assigns P1/P2 to fresh items
+               (everything else becomes P3). Then persist with priorities.
     """
     cycle_started = datetime.now(timezone.utc)
     first_run = store.is_first_run()
@@ -292,6 +280,11 @@ def fetch_cycle(
 
     results = asyncio.run(_fetch_all(sources, config.collection.fetch_concurrency))
 
+    # ---- Pass 1: collect post-recency items across all sources ----
+    pending_items: list[RawItem] = []
+    items_per_source: dict[str, int] = {}
+    raw_per_source: dict[str, int] = {}
+
     for source, raw_items, error in results:
         feed_name = source.name
         if error is not None:
@@ -301,10 +294,9 @@ def fetch_cycle(
             continue
 
         counts["raw"] += len(raw_items)
-        # claude_research opt-in fallback: when the in-window yield is thin,
-        # the Stage-1 prompt is allowed to surface items up to 72h old. Widen
-        # the recency gate only for that source so RSS still respects the
-        # Phase-5 24h rule.
+        raw_per_source[feed_name] = len(raw_items)
+        # claude_research items get a 72h recency gate (allows Stage-1's
+        # in-prompt fallback items); other sources stay at 24h.
         recency_hours = (
             72 if isinstance(source, ClaudeResearchSource)
             else config.collection.recency_hours
@@ -315,51 +307,61 @@ def fetch_cycle(
         counts["no_pubdate"] += n_no_pub
         counts["too_old"] += n_old
         counts["after_recency"] += len(items)
+        items_per_source[feed_name] = len(items)
+        pending_items.extend(items)
 
-        classified_count = 0
-        for item in items:
-            text = _normalize_text(item.title + "\n" + item.raw_text)
-            match = classify(text, watchlists)
-            priority = match.priority
-            dropped_reason: str | None = None
-            if priority == "P3":
-                gate = is_relevant(text, item.source_tier, relevance)
-                if not gate.relevant:
-                    priority = "DROPPED"
-                    dropped_reason = gate.reason
+    # ---- Pass 2: single Opus classify call across all pending items ----
+    priorities: dict[int, str] = {}
+    if pending_items and secrets.anthropic_api_key:
+        priorities = classify_items(
+            pending_items, watchlists, api_key=secrets.anthropic_api_key
+        )
+    elif pending_items:
+        log.warning(
+            "ai_classifier.skipped",
+            reason="no ANTHROPIC_API_KEY; persisting all items as P3",
+            count=len(pending_items),
+        )
 
-            inserted_hash = store.insert_if_new(
-                url=item.url,
-                title=item.title,
-                source=item.source,
-                published_at=item.published_at,
-                priority=priority,
-                dropped_reason=dropped_reason,
-                body=item.raw_text,
-            )
-            if not inserted_hash:
-                continue
+    # ---- Pass 3: persist with priorities ----
+    classified_per_source: dict[str, int] = {}
+    for idx, item in enumerate(pending_items):
+        priority = priorities.get(idx, "P3")
+        inserted_hash = store.insert_if_new(
+            url=item.url,
+            title=item.title,
+            source=item.source,
+            published_at=item.published_at,
+            priority=priority,
+            dropped_reason=None,
+            body=item.raw_text,
+        )
+        if not inserted_hash:
+            continue
 
-            counts["new"] += 1
-            counts[priority.lower()] += 1
-            if priority != "DROPPED":
-                classified_count += 1
-            log.info(
-                "story.new",
-                priority=priority,
-                canonical=match.canonical or None,
-                matched=match.matched_alias or None,
-                dropped_reason=dropped_reason,
-                source=item.source,
-                title=item.title,
-                url=item.url,
-            )
+        counts["new"] += 1
+        counts[priority.lower()] += 1
+        classified_per_source[item.source] = (
+            classified_per_source.get(item.source, 0) + (1 if priority in ("P1", "P2") else 0)
+        )
+        log.info(
+            "story.new",
+            priority=priority,
+            source=item.source,
+            title=item.title,
+            url=item.url,
+        )
 
+    # ---- Per-source stats update (success path) ----
+    for source, raw_items, error in results:
+        if error is not None:
+            continue
+        feed_name = source.name
         store.update_feed_stats(
             feed_name=feed_name,
             success=True,
-            items_returned=len(raw_items),
-            items_classified=classified_count,
+            items_returned=raw_per_source.get(feed_name, 0),
+            items_classified=classified_per_source.get(feed_name, 0),
         )
 
     cycle_seconds = (datetime.now(timezone.utc) - cycle_started).total_seconds()
@@ -382,13 +384,12 @@ def fetch_cycle(
 def run_once(*, dry_run: bool = False) -> dict:
     config = load_config()
     watchlists = load_watchlists(config.watchlists_path)
-    relevance = load_relevance(config.relevance_path)
     feeds = load_feeds(config.feeds_path)
     secrets = Secrets()
     store = Store(config.storage.db_path)
 
     try:
-        return fetch_cycle(config, watchlists, relevance, feeds, secrets, store)
+        return fetch_cycle(config, watchlists, feeds, secrets, store)
     finally:
         store.close()
 
