@@ -111,3 +111,53 @@ def test_curate_digest_falls_back_on_api_exception():
     entries = curate_digest(rows, summarizer)
     assert len(entries) == 1
     summarizer.summarize.assert_called_once()
+
+
+# ---- cap + truncation ------------------------------------------------------
+
+
+def test_curate_digest_caps_output_at_max_entries():
+    """Even if Claude returns more entries than max_entries, the result is sliced."""
+    rows = [_row(title=f"R{i}") for i in range(40)]
+    # Claude returns 25 entries — more than max_entries=15
+    inner = ",".join(
+        f'{{"priority":"P1","headline_ja":"H{i}","original_title":"R{i}","source":"s",'
+        f'"url":"https://example.com/R{i}","summary_bullets":["a"]}}'
+        for i in range(25)
+    )
+    summarizer = _mock_summarizer_with_response(f'{{"entries":[{inner}]}}')
+
+    entries = curate_digest(rows, summarizer, max_entries=15)
+    assert len(entries) == 15
+
+
+def test_curate_digest_truncates_input_to_2x_max_entries():
+    """Only the top max_entries*2 rows are sent to Claude (rest ignored)."""
+    rows = [_row(title=f"R{i}") for i in range(100)]
+    summarizer = _mock_summarizer_with_response('{"entries":[]}')
+    # Force fallback path so we can count summarize() calls
+    summarizer.summarize.return_value = Summary(headline="fb", bullets="- f")
+
+    entries = curate_digest(rows, summarizer, max_entries=15)
+
+    # Curator passed candidates=rows[:30] to Haiku; on empty parse falls back
+    # to per-row summarize on those candidates, then caps at max_entries=15.
+    assert len(entries) == 15
+    assert summarizer.summarize.call_count == 15
+
+    # Verify the prompt only mentioned the first 30 rows (not all 100).
+    sent_prompt = summarizer.client.messages.create.call_args.kwargs["messages"][0][
+        "content"
+    ]
+    assert "R29" in sent_prompt
+    assert "R30" not in sent_prompt
+    assert "R99" not in sent_prompt
+
+
+def test_curate_digest_uses_max_tokens_8192():
+    rows = [_row(title="A")]
+    summarizer = _mock_summarizer_with_response('{"entries":[]}')
+    summarizer.summarize.return_value = Summary(headline="fb", bullets="- f")
+    curate_digest(rows, summarizer)
+    kwargs = summarizer.client.messages.create.call_args.kwargs
+    assert kwargs["max_tokens"] == 8192

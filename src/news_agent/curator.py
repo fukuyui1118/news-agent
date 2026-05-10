@@ -72,9 +72,14 @@ def curate_digest(
     if not rows:
         return []
 
+    # Truncate input to top max_entries*2 — store.digest_eligible_stories
+    # already orders P1 before P2 by collected_at desc, so the slice gives
+    # Haiku the highest-priority rows with some signal beyond max_entries.
+    candidates = rows[: max_entries * 2]
+
     rows_text = "\n".join(
         f"[{r.priority}] {r.title} | source={r.source} | url={r.url} | published_at={r.published_at or ''}"
-        for r in rows
+        for r in candidates
     )
     prompt = CURATOR_PROMPT_TEMPLATE.format(
         rows_text=rows_text,
@@ -85,12 +90,12 @@ def curate_digest(
     try:
         resp = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
         log.warning("curator.api.failed", error=f"{type(e).__name__}: {e}")
-        return _fallback_per_row(rows, summarizer)
+        return _fallback_per_row(candidates, summarizer, max_entries=max_entries)
 
     text = "".join(
         (b.text or "") for b in resp.content if getattr(b, "type", None) == "text"
@@ -124,11 +129,14 @@ def curate_digest(
 
     if not entries:
         log.warning("curator.empty_entries", row_count=len(rows))
-        return _fallback_per_row(rows, summarizer)
+        return _fallback_per_row(candidates, summarizer, max_entries=max_entries)
 
+    # Hard cap — even if Claude returned more entries than requested.
+    entries = entries[:max_entries]
     log.info(
         "curator.done",
         input_rows=len(rows),
+        candidate_rows=len(candidates),
         output_entries=len(entries),
         model=model,
     )
@@ -151,9 +159,14 @@ def _parse_curator_json(text: str) -> dict | None:
 
 
 def _fallback_per_row(
-    rows: list[StoryRow], summarizer: Summarizer
+    rows: list[StoryRow], summarizer: Summarizer, *, max_entries: int = 15
 ) -> list[DigestEntry]:
-    """Per-row Summarizer call — used when batched curation fails."""
+    """Per-row Summarizer call — used when batched curation fails.
+
+    Caps at `max_entries` to prevent the email from blowing up to 100+ rows
+    when the batched curator parse-fails on a large input set.
+    """
+    rows = rows[:max_entries]
     entries: list[DigestEntry] = []
     for r in rows:
         article = Article(
