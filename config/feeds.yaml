@@ -41,6 +41,29 @@ native_rss:
     url: https://www.asahi.com/rss/asahi/business.rdf
     trust_freshness: true   # RDF feed; pubdate may be missing
 
+  # ---- Phase 9.1: Inoreader Pro keyword aggregation ----
+  # User-curated Google-News-style keyword monitors, grouped into 6 thematic
+  # tags shared as public RSS. Item links are Google-News redirects (base64-
+  # encoded payload); content_hash dedup still catches cross-source dups.
+  - name: "Inoreader: foreign-affiliated insurers"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/foreign-affiliated
+    tier: 2
+  - name: "Inoreader: Generic English"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/Generic%20English
+    tier: 2
+  - name: "Inoreader: Generic Japanese"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/Generic%20Japanese
+    tier: 2
+  - name: "Inoreader: Japanese online"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/Japanese%20online
+    tier: 2
+  - name: "Inoreader: 日本生保各社"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/japanese_lifer
+    tier: 2
+  - name: "Inoreader: 日本損保各社"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/japanese_non_lifer
+    tier: 2
+
 # Phase 8: NewsAPI.ai layer dropped entirely. Claude Opus 4.7 + web_search
 # replaces it as the curated research layer, fired twice daily via cadence
 # enforcement. The hourly fetch_cycle still invokes the source, but it
