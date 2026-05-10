@@ -42,9 +42,12 @@ native_rss:
     trust_freshness: true   # RDF feed; pubdate may be missing
 
   # ---- Phase 9.1: Inoreader Pro keyword aggregation ----
-  # User-curated Google-News-style keyword monitors, grouped into 6 thematic
-  # tags shared as public RSS. Item links are Google-News redirects (base64-
-  # encoded payload); content_hash dedup still catches cross-source dups.
+  # User-curated Google-News-style keyword monitors, shared as public RSS
+  # tags. Item links are Google-News redirects (base64-encoded payload);
+  # content_hash dedup still catches cross-source dups.
+  #
+  # Note: Inoreader exports a max of 20 items per tag, so per-carrier tags
+  # (instead of one combined "lifer" / "non-lifer" tag) preserve recency.
   - name: "Inoreader: foreign-affiliated insurers"
     url: https://www.inoreader.com/stream/user/1003696320/tag/foreign-affiliated
     tier: 2
@@ -57,11 +60,35 @@ native_rss:
   - name: "Inoreader: Japanese online"
     url: https://www.inoreader.com/stream/user/1003696320/tag/Japanese%20online
     tier: 2
-  - name: "Inoreader: 日本生保各社"
-    url: https://www.inoreader.com/stream/user/1003696320/tag/japanese_lifer
+  - name: "Inoreader: 朝日生命"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/asahi
     tier: 2
-  - name: "Inoreader: 日本損保各社"
-    url: https://www.inoreader.com/stream/user/1003696320/tag/japanese_non_lifer
+  - name: "Inoreader: 第一生命"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/daiichi
+    tier: 2
+  - name: "Inoreader: 富国生命"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/fukoku
+    tier: 2
+  - name: "Inoreader: かんぽ生命"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/kampo
+    tier: 2
+  - name: "Inoreader: 日本生命"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/nissei
+    tier: 2
+  - name: "Inoreader: ソニー生命"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/sony
+    tier: 2
+  - name: "Inoreader: 住友生命"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/sumitomolife
+    tier: 2
+  - name: "Inoreader: SOMPO"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/SOMPO
+    tier: 2
+  - name: "Inoreader: その他生保"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/other%20lifer
+    tier: 2
+  - name: "Inoreader: その他損保"
+    url: https://www.inoreader.com/stream/user/1003696320/tag/other%20non_lifer
     tier: 2
 
 # Phase 8: NewsAPI.ai layer dropped entirely. Claude Opus 4.7 + web_search
