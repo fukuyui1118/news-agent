@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 
@@ -21,6 +23,9 @@ from .store import StoryRow
 from .summarizer import Article, Summarizer
 
 log = structlog.get_logger()
+
+# Persisted prompt/response dumps for debugging. One file per call.
+DUMP_DIR = Path("logs/ai_email")
 
 DEFAULT_EMAIL_MODEL = "claude-opus-4-7"
 
@@ -97,6 +102,8 @@ def compose_email(
     text = "".join(
         (b.text or "") for b in resp.content if getattr(b, "type", None) == "text"
     )
+    _dump_call(prompt=prompt, response_text=text, elapsed_ms=elapsed_ms, model=model,
+               input_count=len(rows))
     parsed = _parse_email_json(text)
     if parsed is None:
         log.warning("ai_email.parse.failed", preview=text[:200])
@@ -138,6 +145,27 @@ def compose_email(
         model=model,
     )
     return entries
+
+
+def _dump_call(*, prompt: str, response_text: str, elapsed_ms: int, model: str,
+               input_count: int) -> None:
+    """Write the prompt + raw response to logs/ai_email/. Best-effort."""
+    try:
+        DUMP_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        path = DUMP_DIR / f"email__{ts}.json"
+        envelope = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "input_count": input_count,
+            "elapsed_ms": elapsed_ms,
+            "prompt": prompt,
+            "response_text": response_text,
+        }
+        path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2))
+        log.info("ai_email.dump.saved", path=str(path))
+    except Exception as e:
+        log.warning("ai_email.dump.failed", error=f"{type(e).__name__}: {e}")
 
 
 def _parse_email_json(text: str) -> dict | None:

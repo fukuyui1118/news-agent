@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 from anthropic import Anthropic
@@ -22,6 +24,9 @@ from .config import Watchlists
 from .sources.base import RawItem
 
 log = structlog.get_logger()
+
+# Persisted prompt/response dumps for debugging. One file per call.
+DUMP_DIR = Path("logs/ai_classifier")
 
 DEFAULT_CLASSIFIER_MODEL = "claude-opus-4-7"
 
@@ -99,6 +104,8 @@ def classify_items(
     text = "".join(
         (b.text or "") for b in resp.content if getattr(b, "type", None) == "text"
     )
+    _dump_call(prompt=prompt, response_text=text, elapsed_ms=elapsed_ms, model=model,
+               input_count=len(items))
     parsed = _parse_classifier_json(text)
     if parsed is None:
         log.error("ai_classifier.parse.failed", preview=text[:300])
@@ -122,6 +129,27 @@ def classify_items(
         model=model,
     )
     return out
+
+
+def _dump_call(*, prompt: str, response_text: str, elapsed_ms: int, model: str,
+               input_count: int) -> None:
+    """Write the prompt + raw response to logs/ai_classifier/. Best-effort."""
+    try:
+        DUMP_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        path = DUMP_DIR / f"classify__{ts}.json"
+        envelope = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "input_count": input_count,
+            "elapsed_ms": elapsed_ms,
+            "prompt": prompt,
+            "response_text": response_text,
+        }
+        path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2))
+        log.info("ai_classifier.dump.saved", path=str(path))
+    except Exception as e:
+        log.warning("ai_classifier.dump.failed", error=f"{type(e).__name__}: {e}")
 
 
 def _parse_classifier_json(text: str) -> dict | None:
