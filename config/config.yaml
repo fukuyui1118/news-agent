@@ -15,8 +15,6 @@ collection:
   fetch_concurrency: 10   # parallel fetches per cycle
 
 scheduler:
-  fetch_interval_minutes: 60
-  p1_batch_interval_hours: 3
-  digest_cron_hour: 7
+  digest_cron_hours: "7,19"   # twice daily — full pipeline (fetch + curate + email) per tick
   digest_cron_minute: 0
   timezone: Asia/Tokyo

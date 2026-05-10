@@ -5,7 +5,12 @@ import sys
 
 import structlog
 
-from .agent import print_stats, run_digest_now, run_once, run_p1_batch_now
+from .agent import (
+    print_stats,
+    run_digest_now,
+    run_fetch_and_digest_now,
+    run_once,
+)
 from .config import load_config
 from .logging_setup import setup_logging
 
@@ -16,14 +21,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="news-agent")
     parser.add_argument("--once", action="store_true", help="Run a single fetch cycle and exit.")
     parser.add_argument(
-        "--p1-batch-now",
+        "--fetch-and-digest-now",
         action="store_true",
-        help="Force send the P1 batch (3-hour cadence) now and exit.",
+        help="Run one fetch cycle followed by one digest send. Mirrors a scheduled 07:00/19:00 JST tick.",
     )
     parser.add_argument(
         "--digest-now",
         action="store_true",
-        help="Force send today's digest (P1+P2 from last 24h) and exit.",
+        help="Force send the digest (P1+P2 from last 12h) now and exit.",
     )
     parser.add_argument(
         "--dry-run",
@@ -49,9 +54,9 @@ def main(argv: list[str] | None = None) -> int:
         log.info("cycle.done", **counts)
         return 0
 
-    if args.p1_batch_now:
-        counts = run_p1_batch_now(dry_run=args.dry_run)
-        log.info("p1_batch.done", **counts)
+    if args.fetch_and_digest_now:
+        counts = run_fetch_and_digest_now(dry_run=args.dry_run)
+        log.info("fetch_and_digest.done", **counts)
         return 0
 
     if args.digest_now:

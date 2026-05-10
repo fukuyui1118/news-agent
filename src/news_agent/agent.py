@@ -393,29 +393,6 @@ def run_once(*, dry_run: bool = False) -> dict:
         store.close()
 
 
-def run_p1_batch_now(*, dry_run: bool = False) -> dict[str, object]:
-    from .digest import run_p1_batch
-
-    config = load_config()
-    summarizer, mailer = _build_runtime_components(dry_run=dry_run)
-    if summarizer is None or mailer is None:
-        log.error(
-            "p1_batch.skipped",
-            reason="missing summarizer or mailer (set ANTHROPIC_API_KEY and SMTP creds, or use --dry-run)",
-        )
-        return {"summarized": 0, "failed": 0, "suppressed_dup": 0, "sent": False}
-    store = Store(config.storage.db_path)
-    try:
-        return run_p1_batch(
-            store=store,
-            summarizer=summarizer,
-            mailer=mailer,
-            timezone_name=config.scheduler.timezone,
-        )
-    finally:
-        store.close()
-
-
 def run_digest_now(*, dry_run: bool = False) -> dict[str, object]:
     from .digest import run_digest
 
@@ -437,6 +414,19 @@ def run_digest_now(*, dry_run: bool = False) -> dict[str, object]:
         )
     finally:
         store.close()
+
+
+def run_fetch_and_digest_now(*, dry_run: bool = False) -> dict[str, object]:
+    """Manual full-pipeline trigger: one fetch cycle followed by one digest.
+
+    Mirrors what the scheduler does at each 07:00 / 19:00 JST tick.
+    """
+    fetch_counts = run_once(dry_run=dry_run)
+    digest_counts = run_digest_now(dry_run=dry_run)
+    return {
+        "fetch": fetch_counts,
+        "digest": digest_counts,
+    }
 
 
 def print_stats() -> int:

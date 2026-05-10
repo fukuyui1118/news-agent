@@ -1,9 +1,9 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from news_agent.digest import run_digest
-from news_agent.mailer import DigestPayload, Mailer
+from news_agent.mailer import DigestEntry, DigestPayload, Mailer
 from news_agent.store import Store, StoryRow
-from news_agent.summarizer import Summary, Summarizer
+from news_agent.summarizer import Summarizer
 
 
 def _row(priority: str = "P1", title: str = "Test") -> StoryRow:
@@ -14,6 +14,17 @@ def _row(priority: str = "P1", title: str = "Test") -> StoryRow:
         source="TestSource",
         published_at="2026-05-09T12:00:00",
         priority=priority,
+    )
+
+
+def _entry(priority: str = "P1", title: str = "Test") -> DigestEntry:
+    return DigestEntry(
+        priority=priority,
+        headline_ja="日本語見出し",
+        original_title=title,
+        source="TestSource",
+        url=f"https://example.com/{title}",
+        summary_bullets="- a\n- b",
     )
 
 
@@ -29,19 +40,36 @@ def test_digest_empty_returns_not_sent():
     mailer.send_digest.assert_not_called()
 
 
-def test_digest_summarizes_p1_and_p2_and_sends_one_email():
+def test_digest_default_lookback_is_12h():
+    store = MagicMock(spec=Store)
+    store.digest_eligible_stories.return_value = []
+    summarizer = MagicMock(spec=Summarizer)
+    mailer = MagicMock(spec=Mailer)
+    mailer.dry_run = True
+
+    run_digest(store=store, summarizer=summarizer, mailer=mailer)
+    store.digest_eligible_stories.assert_called_once()
+    kwargs = store.digest_eligible_stories.call_args.kwargs
+    assert kwargs["hours"] == 12
+
+
+def test_digest_calls_curator_and_sends_mailer():
     store = MagicMock(spec=Store)
     store.digest_eligible_stories.return_value = [
         _row(priority="P1", title="A"),
         _row(priority="P2", title="B"),
     ]
     summarizer = MagicMock(spec=Summarizer)
-    summarizer.summarize.return_value = Summary(headline="見出し", bullets="- a")
     mailer = MagicMock(spec=Mailer)
     mailer.dry_run = True
 
-    result = run_digest(store=store, summarizer=summarizer, mailer=mailer)
+    with patch(
+        "news_agent.digest.curate_digest",
+        return_value=[_entry(priority="P1", title="A"), _entry(priority="P2", title="B")],
+    ) as mock_curate:
+        result = run_digest(store=store, summarizer=summarizer, mailer=mailer)
 
+    mock_curate.assert_called_once()
     assert result["summarized"] == 2
     assert result["sent"] is True
     mailer.send_digest.assert_called_once()
@@ -50,41 +78,16 @@ def test_digest_summarizes_p1_and_p2_and_sends_one_email():
     assert {e.priority for e in payload.entries} == {"P1", "P2"}
 
 
-def test_digest_within_dedup_suppresses_similar_titles():
+def test_digest_curator_empty_skips_send():
     store = MagicMock(spec=Store)
-    store.digest_eligible_stories.return_value = [
-        _row(priority="P1", title="Tokio Marine reports Q4 earnings beat"),
-        _row(priority="P1", title="Tokio Marine ups Q4 guidance after earnings"),
-        _row(priority="P2", title="Allianz exits cyber business"),
-    ]
+    store.digest_eligible_stories.return_value = [_row(title="A")]
     summarizer = MagicMock(spec=Summarizer)
-    summarizer.summarize.return_value = Summary(headline="x", bullets="- y")
     mailer = MagicMock(spec=Mailer)
     mailer.dry_run = True
 
-    result = run_digest(store=store, summarizer=summarizer, mailer=mailer)
+    with patch("news_agent.digest.curate_digest", return_value=[]):
+        result = run_digest(store=store, summarizer=summarizer, mailer=mailer)
 
-    assert result["summarized"] == 2  # second TM story dropped as dup
-    assert result["suppressed_dup"] == 1
-    assert result["sent"] is True
-
-
-def test_digest_handles_summarizer_failure():
-    store = MagicMock(spec=Store)
-    store.digest_eligible_stories.return_value = [
-        _row(priority="P1", title="ok"),
-        _row(priority="P2", title="bad"),
-    ]
-    summarizer = MagicMock(spec=Summarizer)
-    summarizer.summarize.side_effect = [
-        Summary(headline="ok", bullets="- a"),
-        RuntimeError("API fail"),
-    ]
-    mailer = MagicMock(spec=Mailer)
-    mailer.dry_run = True
-
-    result = run_digest(store=store, summarizer=summarizer, mailer=mailer)
-
-    assert result["summarized"] == 1
-    assert result["failed"] == 1
-    assert result["sent"] is True
+    assert result["sent"] is False
+    assert result["summarized"] == 0
+    mailer.send_digest.assert_not_called()

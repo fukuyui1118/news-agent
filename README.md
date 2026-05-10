@@ -4,7 +4,7 @@ A long-running agent that monitors insurance and reinsurance news, classifies ea
 
 ## What it does, in one paragraph
 
-Every hour, the agent fetches news from 13 RSS feeds. Twice a day (12-hour cadence), it also asks **Claude Opus 4.7 + web_search** to research the past 24 hours of insurance-sector news using a structured two-stage prompt. Every fetched item is dedup-checked, classified by entity (Tokio Marine, Munich Re, etc.) and by relevance keywords, then persisted in `seen.db`. P1 (Japan-impact) items are batched into an email every 3 hours; a daily 07:00 JST digest emails P1+P2 from the last 24 hours. P3 items are visible only in the dashboard. DROPPED items are stored only so dedup catches them in the next cycle.
+Twice a day at **07:00 and 19:00 JST**, the agent runs one full pipeline tick: fetches news from RSS feeds (13 native + 26 user-curated Inoreader keyword feeds), asks **Claude Opus 4.7 + web_search** to research the past 12 hours of insurance-sector news via a structured two-stage prompt, dedup-checks and classifies each headline by entity (Tokio Marine, Munich Re, etc.) and by relevance keywords, persists everything in `seen.db`, then asks Claude Haiku to **curate** the surviving P1+P2 items into a ranked, deduplicated digest with Japanese summaries and emails it. P3 items go to the dashboard only; DROPPED items exist only so dedup catches them next tick.
 
 ---
 
@@ -59,7 +59,8 @@ The prompt runs in two stages:
         │
         ▼
    ┌─────────────────────┐
-   │ 1. Fetch (parallel) │  RSS × 13  +  Claude Research × 1 (cadence-gated)
+   │ 1. Fetch (parallel) │  RSS × 13 native + 26 Inoreader keyword feeds
+   │                     │  + Claude Research × 1 (cadence-gated 12h)
    └────────┬────────────┘
             ▼
    ┌─────────────────────┐
@@ -90,8 +91,9 @@ The prompt runs in two stages:
    └────────┬────────────┘
             ▼
    ┌─────────────────────┐
-   │ 8. Summarize + send │  P1 → Claude Haiku Japanese summary → P1 batch (3-hour cadence)
-   │                     │  P2 → wait for daily digest
+   │ 8. Curate + email   │  one Claude Haiku call: dedup same-event clusters,
+   │                     │  rank Tier 1 first, ≤15 entries with JP summaries
+   │                     │  → single digest email per tick (07:00 / 19:00 JST)
    │                     │  P3 → dashboard only, no email
    │                     │  DROPPED → never emailed; row exists only for dedup
    └─────────────────────┘
@@ -111,14 +113,14 @@ A single source failure never crashes a cycle — every `fetch()` is wrapped in 
 
 ### What gets emailed
 
-| Priority | Email path | Recipient cadence |
+| Priority | Email path | Cadence |
 |---|---|---|
-| **P1** (Japan-HQ insurer impact) | Batched **every 3 hours**. Subject `【ニュースエージェント P1】MM/DD HH:00 (N件)`. Title-similarity dedup against the last 24h of emailed P1 titles (Jaccard ≥ 0.55) so the same event from two outlets is collapsed to one entry. | Real-time-ish |
-| **P2** (Global majors) | **Daily 07:00 JST digest**. Subject `【ニュースエージェント】日次ダイジェスト MM/DD`. Includes P1+P2 from the last 24 hours (P1 stories may already have been sent in 3-hour batches; the digest is a curated daily recap). | Once per day |
+| **P1** (Japan-HQ insurer impact) | Included in the curated digest. | Twice daily, 07:00 and 19:00 JST |
+| **P2** (Global majors) | Included in the curated digest. | Twice daily, 07:00 and 19:00 JST |
 | **P3** | Never emailed. Visible only in the dashboard. | — |
-| **DROPPED** | Never emailed. Row exists only so dedup catches the URL on the next cycle. | — |
+| **DROPPED** | Never emailed. Row exists only so dedup catches the URL on the next tick. | — |
 
-Each P1/P2 entry in an email is summarized in Japanese by Claude Haiku 4.5 (`(headline, bullets)` format).
+Each digest is produced by **one Claude Haiku call** that takes the last 12 hours of P1+P2 items and returns a ranked, deduplicated list (≤15 entries) with one-line Japanese headlines and 3–5-bullet Japanese summaries. Subject: `【ニュースエージェント】ダイジェスト MM/DD HH:00`. Same-event items from multiple outlets are collapsed to one entry.
 
 ### SMTP config
 
@@ -138,10 +140,11 @@ Generate an app password at https://myaccount.google.com/apppasswords (requires 
 ### Manual triggers
 
 ```bash
-python -m news_agent --p1-batch-now            # force P1 batch now
-python -m news_agent --p1-batch-now --dry-run  # preview without sending
-python -m news_agent --digest-now              # force daily digest now
-python -m news_agent --digest-now --dry-run    # preview without sending
+python -m news_agent --fetch-and-digest-now            # one full pipeline tick (mirrors a 7AM/7PM JST run)
+python -m news_agent --fetch-and-digest-now --dry-run  # full pipeline, print email instead of sending
+python -m news_agent --digest-now                      # send digest from existing seen.db (no fetch)
+python -m news_agent --digest-now --dry-run            # preview digest without sending
+python -m news_agent --once                            # one fetch cycle only, no email
 ```
 
 ---
@@ -183,12 +186,10 @@ All driven by APScheduler in [`src/news_agent/scheduler.py`](src/news_agent/sche
 
 | Job | Schedule | Trigger | What it does |
 |---|---|---|---|
-| **Fetch cycle** | every **60 minutes** | `IntervalTrigger(minutes=60)` | Fetch all RSS + Claude Research (if cadence open), classify, persist. ~80–95s wall time. |
-| **Claude Research cadence** | **12h** between calls | self-skip in `ClaudeResearchSource` based on `api_usage` table | Inside the hourly cycle, the source self-skips if it ran <12h ago. ~$1–2/day. |
-| **P1 batch email** | every **3 hours** | `IntervalTrigger(hours=3)` | Email any unemailed P1 stories from the last 24h. |
-| **Daily digest** | **07:00 JST** every day | `CronTrigger(hour=7, minute=0, timezone="Asia/Tokyo")` | Email all P1+P2 stories from the last 24h. |
-| **Recency filter** | n/a (per-cycle) | inline | RSS: 24h. Claude Research: 72h (allows fallback items). |
-| **Cadence reset on key change** | n/a | manual | Touching the model name in `feeds.yaml` doesn't reset cadence — to force a Claude Research call now, run `python -m news_agent --once` after wiping the relevant `api_usage` row. |
+| **Full pipeline tick** | **07:00 and 19:00 JST** | `CronTrigger(hour='7,19', minute=0, timezone='Asia/Tokyo')` | Fetch all RSS + Claude Research (if cadence open) → classify → curate via Haiku → email digest. ~3 min wall time. |
+| **Claude Research cadence** | **12h** between calls | self-skip in `ClaudeResearchSource` based on `api_usage` table | Aligns naturally with the 12h scheduler cadence (last call ~12h ago, opens for the next). ~$1–3/day. |
+| **Recency filter** | per-tick | inline | RSS: 24h. Claude Research: 72h (allows fallback items). |
+| **Cadence reset** | manual | n/a | To force a Claude Research call before its 12h window opens, delete the most recent `api_usage` row for that query and rerun `--once`. |
 
 ---
 
@@ -207,12 +208,15 @@ All driven by APScheduler in [`src/news_agent/scheduler.py`](src/news_agent/sche
 ## Run modes
 
 ```bash
-python -m news_agent --once                  # one fetch cycle, exit
-python -m news_agent --once --dry-run        # one cycle, no emails
-python -m news_agent                         # long-running scheduler (production)
-python -m news_agent --dry-run               # scheduler in dry-run
-python -m news_agent --p1-batch-now          # force P1 batch
-python -m news_agent --digest-now            # force daily digest
+python -m news_agent --once                       # one fetch cycle, no email
+python -m news_agent --once --dry-run             # one cycle, no email regardless of mailer config
+python -m news_agent --fetch-and-digest-now       # one full pipeline tick (mirrors a 07:00/19:00 JST run)
+python -m news_agent --fetch-and-digest-now --dry-run
+python -m news_agent --digest-now                 # send digest from existing seen.db (no fetch)
+python -m news_agent --digest-now --dry-run       # preview digest, no send
+python -m news_agent                              # long-running scheduler (production)
+python -m news_agent --dry-run                    # scheduler in dry-run
+python -m news_agent --stats                      # one-shot DB/feed/api_usage summary
 ```
 
 ---

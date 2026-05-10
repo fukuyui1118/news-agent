@@ -125,9 +125,7 @@ class Collection(BaseModel):
 
 
 class Scheduler(BaseModel):
-    fetch_interval_minutes: int = 60
-    p1_batch_interval_hours: int = 3
-    digest_cron_hour: int = 7
+    digest_cron_hours: str = "7,19"   # comma-separated hour list for the cron trigger
     digest_cron_minute: int = 0
     timezone: str = "Asia/Tokyo"
 
